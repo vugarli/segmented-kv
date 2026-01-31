@@ -12,7 +12,7 @@ import (
 )
 
 type FileSystem interface {
-	fs.FS
+	Open(name string) (*os.File, error)
 	CreateTemp(dir string, pattern string) (*os.File, error)
 	Remove(name string) error
 	ReadDir(name string) ([]fs.DirEntry, error)
@@ -22,6 +22,10 @@ type OSFileSystem struct{}
 
 func (OSFileSystem) CreateTemp(dir string, pattern string) (*os.File, error) {
 	return os.CreateTemp(dir, pattern)
+}
+
+func (OSFileSystem) Open(name string) (*os.File, error) {
+	return os.Open(name)
 }
 
 func (OSFileSystem) ReadDir(name string) ([]fs.DirEntry, error) {
@@ -46,22 +50,53 @@ type LatestEntryRecord struct {
 	Timestamp uint64
 }
 
-type Store struct {
+// 	Get(key string) ([]byte, error)
+// 	ListKeys() ([]string, error)
+
+// 	Put(key string, value []byte) error
+// 	Delete(key string) error
+// 	Merge(directoryName string) error
+// 	Sync() error
+// 	Close() error
+
+type store struct {
 	DirectoryName string
 	KeyDir        map[string]LatestEntryRecord
 }
 
-type Operation int
+type Store struct {
+	*store
+	syncOnPut bool
+}
 
-const (
-	ReadWrite Operation = iota
-	SyncWrite
-	Read
-)
+type ReadOnlyStore struct {
+	*store
+}
 
-func (o Operation) IsStoreOperation() {}
+func (*store) Get(key string) ([]byte, error) {
+	return nil, nil
+}
+func (*store) ListKeys() ([]string, error) {
+	return nil, nil
+}
 
-type StoreOperation interface{ IsStoreOperation() }
+func (*Store) Put(key string, value []byte) error {
+	return nil
+}
+
+func (*Store) Delete(key string) error {
+	return nil
+}
+
+func (*Store) Merge(directoryName string) error {
+	return nil
+}
+func (*Store) Sync() error {
+	return nil
+}
+func (*Store) Close() error {
+	return nil
+}
 
 var (
 	ErrInvalidStoreOperation          = errors.New("Invalid store operation error")
@@ -69,32 +104,27 @@ var (
 	ErrStoreDirectoryPermissionDenied = errors.New("Permission denied error")
 )
 
-func Open(directory string, operation StoreOperation, fileSystem FileSystem) (*Store, error) {
-	if err := validateOperation(operation); err != nil {
+func Open(directory string, fileSystem FileSystem, syncOnPut bool) (*Store, error) {
+	if err := validateReadPermission(directory, fileSystem); err != nil {
+		return nil, err
+	}
+	if err := validateWritePermission(directory, fileSystem); err != nil {
 		return nil, err
 	}
 
-	if err := validatePermissions(directory, operation, fileSystem); err != nil {
-		return nil, err
-	}
 	// locking mechanisms?
 	// check op then return appropriate store
-	return &Store{DirectoryName: directory, KeyDir: make(map[string]LatestEntryRecord)}, nil
+	return &Store{
+		store:     &store{DirectoryName: directory, KeyDir: make(map[string]LatestEntryRecord)},
+		syncOnPut: syncOnPut}, nil
 }
 
-func OpenReadOnly(directory string, fileSystem FileSystem) (*Store, error) {
-	return Open(directory, Read, fileSystem)
-}
-
-func validatePermissions(directory string, operation StoreOperation, fileSystem FileSystem) error {
-	switch operation {
-	case Read:
-		return validateReadPermission(directory, fileSystem)
-	case ReadWrite, SyncWrite:
-		return validateWritePermission(directory, fileSystem)
-	default:
-		return ErrInvalidStoreOperation
+func OpenReadOnly(directory string, fileSystem FileSystem) (*ReadOnlyStore, error) {
+	if err := validateReadPermission(directory, fileSystem); err != nil {
+		return nil, err
 	}
+	return &ReadOnlyStore{
+		store: &store{DirectoryName: directory, KeyDir: make(map[string]LatestEntryRecord)}}, nil
 }
 
 func validateReadPermission(directory string, fileSystem FileSystem) error {
@@ -131,12 +161,6 @@ func validateWritePermission(directory string, fileSystem FileSystem) error {
 	if tmpFile != nil {
 		tmpFile.Close()
 		fileSystem.Remove(tmpFile.Name())
-	}
-	return nil
-}
-func validateOperation(operation StoreOperation) error {
-	if operation != ReadWrite && operation != SyncWrite && operation != Read {
-		return ErrInvalidStoreOperation
 	}
 	return nil
 }

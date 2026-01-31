@@ -6,97 +6,20 @@ import (
 	"os"
 	"syscall"
 	"testing"
-	"time"
 )
 
-type MockFileInfo struct {
-	name  string
-	size  int64
-	mode  fs.FileMode
-	isDir bool
-}
-
-func (m MockFileInfo) Name() string       { return m.name }
-func (m MockFileInfo) Size() int64        { return m.size }
-func (m MockFileInfo) Mode() fs.FileMode  { return m.mode }
-func (m MockFileInfo) ModTime() time.Time { return time.Now() }
-func (m MockFileInfo) IsDir() bool        { return m.isDir }
-func (m MockFileInfo) Sys() interface{}   { return nil }
-
-type MockFileSystem struct {
-	StatFunc       func(name string) (fs.FileInfo, error)
-	CreateTempFunc func(dir, pattern string) (*os.File, error)
-	RemoveFunc     func(name string) error
-	ReadDirFunc    func(name string) ([]fs.DirEntry, error)
-}
-
-func (m MockFileSystem) Open(name string) (fs.File, error) {
-	return nil, fs.ErrNotExist
-}
-
-func (m MockFileSystem) Stat(name string) (fs.FileInfo, error) {
-	if m.StatFunc != nil {
-		return m.StatFunc(name)
-	}
-	return nil, fs.ErrNotExist
-}
-
-func (m MockFileSystem) CreateTemp(dir string, pattern string) (*os.File, error) {
-	if m.CreateTempFunc != nil {
-		return m.CreateTempFunc(dir, pattern)
-	}
-	return nil, nil
-}
-
-func (m MockFileSystem) ReadDir(name string) ([]fs.DirEntry, error) {
-	if m.ReadDirFunc != nil {
-		return m.ReadDirFunc(name)
-	}
-	return nil, nil
-}
-
-func (m MockFileSystem) Remove(name string) error {
-	if m.RemoveFunc != nil {
-		return m.RemoveFunc(name)
-	}
-	return nil
-}
-
 func TestOpen(t *testing.T) {
-	// invalid operation
-	// directory doesn't exist
-	// path is not directory
-	// permission
-
 	tests := []struct {
 		name          string
-		operation     Operation
 		path          string
+		syncOnPut     bool
 		expectedError error
 		setupMock     func(*MockFileSystem)
 	}{
 		{
-			name:          "Invalid operation",
-			operation:     Operation(999),
-			path:          "/valid/dir",
-			expectedError: ErrInvalidStoreOperation,
-			setupMock:     func(m *MockFileSystem) {},
-		},
-		{
-			name:          "Directory doesn't exist - ReadWrite",
-			operation:     ReadWrite,
+			name:          "Directory doesn't exist",
 			path:          "/nonexistent",
-			expectedError: ErrStoreDirectoryNotFound,
-			setupMock: func(m *MockFileSystem) {
-				m.CreateTempFunc = func(dir, pattern string) (*os.File, error) {
-					return nil, os.ErrNotExist
-				}
-			},
-		},
-		{
-			name:          "Directory doesn't exist - Read",
-			operation:     Read,
-			path:          "/nonexistent",
+			syncOnPut:     false,
 			expectedError: ErrStoreDirectoryNotFound,
 			setupMock: func(m *MockFileSystem) {
 				m.ReadDirFunc = func(name string) ([]fs.DirEntry, error) {
@@ -105,20 +28,9 @@ func TestOpen(t *testing.T) {
 			},
 		},
 		{
-			name:          "Path is file not directory - ReadWrite",
-			operation:     ReadWrite,
+			name:          "Path is file not directory",
 			path:          "/file.txt",
-			expectedError: ErrStoreDirectoryNotFound,
-			setupMock: func(m *MockFileSystem) {
-				m.CreateTempFunc = func(dir, pattern string) (*os.File, error) {
-					return nil, syscall.ENOTDIR
-				}
-			},
-		},
-		{
-			name:          "Path is file not directory - Read",
-			operation:     Read,
-			path:          "/file.txt",
+			syncOnPut:     false,
 			expectedError: ErrStoreDirectoryNotFound,
 			setupMock: func(m *MockFileSystem) {
 				m.ReadDirFunc = func(name string) ([]fs.DirEntry, error) {
@@ -128,8 +40,8 @@ func TestOpen(t *testing.T) {
 		},
 		{
 			name:          "No read permission",
-			operation:     Read,
 			path:          "/restricted",
+			syncOnPut:     false,
 			expectedError: ErrStoreDirectoryPermissionDenied,
 			setupMock: func(m *MockFileSystem) {
 				m.ReadDirFunc = func(name string) ([]fs.DirEntry, error) {
@@ -139,21 +51,27 @@ func TestOpen(t *testing.T) {
 		},
 		{
 			name:          "No write permission",
-			operation:     ReadWrite,
 			path:          "/readonly",
+			syncOnPut:     false,
 			expectedError: ErrStoreDirectoryPermissionDenied,
 			setupMock: func(m *MockFileSystem) {
+				m.ReadDirFunc = func(name string) ([]fs.DirEntry, error) {
+					return []fs.DirEntry{}, nil
+				}
 				m.CreateTempFunc = func(dir, pattern string) (*os.File, error) {
 					return nil, os.ErrPermission
 				}
 			},
 		},
 		{
-			name:          "Successful ReadWrite open",
-			operation:     ReadWrite,
+			name:          "Successful open without sync",
 			path:          "/valid/store",
+			syncOnPut:     false,
 			expectedError: nil,
 			setupMock: func(m *MockFileSystem) {
+				m.ReadDirFunc = func(name string) ([]fs.DirEntry, error) {
+					return []fs.DirEntry{}, nil
+				}
 				m.CreateTempFunc = func(dir, pattern string) (*os.File, error) {
 					return nil, nil
 				}
@@ -163,13 +81,19 @@ func TestOpen(t *testing.T) {
 			},
 		},
 		{
-			name:          "Successful Read open",
-			operation:     Read,
+			name:          "Successful open with sync",
 			path:          "/valid/store",
+			syncOnPut:     true,
 			expectedError: nil,
 			setupMock: func(m *MockFileSystem) {
 				m.ReadDirFunc = func(name string) ([]fs.DirEntry, error) {
 					return []fs.DirEntry{}, nil
+				}
+				m.CreateTempFunc = func(dir, pattern string) (*os.File, error) {
+					return nil, nil
+				}
+				m.RemoveFunc = func(name string) error {
+					return nil
 				}
 			},
 		},
@@ -180,7 +104,7 @@ func TestOpen(t *testing.T) {
 			mockFS := &MockFileSystem{}
 			tt.setupMock(mockFS)
 
-			store, err := Open(tt.path, tt.operation, mockFS)
+			store, err := Open(tt.path, mockFS, tt.syncOnPut)
 
 			if tt.expectedError != nil {
 				if err == nil {
@@ -199,10 +123,102 @@ func TestOpen(t *testing.T) {
 				if store == nil {
 					t.Fatal("Expected non-nil store, got nil")
 				}
+				if store.DirectoryName != tt.path {
+					t.Errorf("Expected directory %s, got %s", tt.path, store.DirectoryName)
+				}
+				if store.KeyDir == nil {
+					t.Errorf("Expected initialized KeyDir, got nil")
+				}
+				if store.syncOnPut != tt.syncOnPut {
+					t.Errorf("Expected syncOnPut %v, got %v", tt.syncOnPut, store.syncOnPut)
+				}
 			}
 		})
 	}
+}
 
+func TestOpenReadOnly(t *testing.T) {
+	tests := []struct {
+		name          string
+		path          string
+		expectedError error
+		setupMock     func(*MockFileSystem)
+	}{
+		{
+			name:          "Directory doesn't exist",
+			path:          "/nonexistent",
+			expectedError: ErrStoreDirectoryNotFound,
+			setupMock: func(m *MockFileSystem) {
+				m.ReadDirFunc = func(name string) ([]fs.DirEntry, error) {
+					return nil, os.ErrNotExist
+				}
+			},
+		},
+		{
+			name:          "Path is file not directory",
+			path:          "/file.txt",
+			expectedError: ErrStoreDirectoryNotFound,
+			setupMock: func(m *MockFileSystem) {
+				m.ReadDirFunc = func(name string) ([]fs.DirEntry, error) {
+					return nil, syscall.ENOTDIR
+				}
+			},
+		},
+		{
+			name:          "No read permission",
+			path:          "/restricted",
+			expectedError: ErrStoreDirectoryPermissionDenied,
+			setupMock: func(m *MockFileSystem) {
+				m.ReadDirFunc = func(name string) ([]fs.DirEntry, error) {
+					return nil, os.ErrPermission
+				}
+			},
+		},
+		{
+			name:          "Successful read-only open",
+			path:          "/valid/store",
+			expectedError: nil,
+			setupMock: func(m *MockFileSystem) {
+				m.ReadDirFunc = func(name string) ([]fs.DirEntry, error) {
+					return []fs.DirEntry{}, nil
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockFS := &MockFileSystem{}
+			tt.setupMock(mockFS)
+
+			store, err := OpenReadOnly(tt.path, mockFS)
+
+			if tt.expectedError != nil {
+				if err == nil {
+					t.Fatalf("Expected error %v, got nil", tt.expectedError)
+				}
+				if !errors.Is(err, tt.expectedError) {
+					t.Errorf("Expected error %v, got %v", tt.expectedError, err)
+				}
+				if store != nil {
+					t.Errorf("Expected nil store on error, got %+v", store)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("Expected no error, got %v", err)
+				}
+				if store == nil {
+					t.Fatal("Expected non-nil store, got nil")
+				}
+				if store.DirectoryName != tt.path {
+					t.Errorf("Expected directory %s, got %s", tt.path, store.DirectoryName)
+				}
+				if store.KeyDir == nil {
+					t.Errorf("Expected initialized KeyDir, got nil")
+				}
+			}
+		})
+	}
 }
 
 // func TestInitEntry(t *testing.T) {
