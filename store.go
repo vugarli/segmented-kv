@@ -7,6 +7,9 @@ import (
 	"hash/crc32"
 	"io/fs"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -16,6 +19,9 @@ type FileSystem interface {
 	CreateTemp(dir string, pattern string) (*os.File, error)
 	Remove(name string) error
 	ReadDir(name string) ([]fs.DirEntry, error)
+	acquireExclusiveLock(directory string) (*os.File, error)
+	acquireSharedLock(directory string) (*os.File, error)
+	getNewFileId(directory string) (uint32, error)
 }
 
 type OSFileSystem struct{}
@@ -62,6 +68,8 @@ type LatestEntryRecord struct {
 type store struct {
 	DirectoryName string
 	KeyDir        map[string]LatestEntryRecord
+	lockFile      *os.File
+	currentFileId uint32
 }
 
 type Store struct {
@@ -102,7 +110,82 @@ var (
 	ErrInvalidStoreOperation          = errors.New("Invalid store operation error")
 	ErrStoreDirectoryNotFound         = errors.New("Specified store directory doesn't exist error")
 	ErrStoreDirectoryPermissionDenied = errors.New("Permission denied error")
+	ErrStoreLocked                    = errors.New("Store is locked")
 )
+
+func (of OSFileSystem) acquireExclusiveLock(directory string) (*os.File, error) {
+	filePath := filepath.Join(directory, ".lock")
+
+	lockFile, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR, 0644)
+
+	if err != nil {
+		return nil, fmt.Errorf("cannot create lock file: %w", err)
+	}
+
+	if err := Lock(lockFile); err != nil {
+		lockFile.Close()
+		return nil, err
+	}
+
+	lockFile.Truncate(0)
+	lockFile.Seek(0, 0)
+	fmt.Fprintf(lockFile, "%d\n", os.Getpid())
+	lockFile.Sync()
+
+	return lockFile, nil
+}
+
+func (of OSFileSystem) acquireSharedLock(directory string) (*os.File, error) {
+	filePath := filepath.Join(directory, ".lock")
+
+	lockFile, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR, 0644)
+
+	if err != nil {
+		return nil, fmt.Errorf("cannot create lock file: %w", err)
+	}
+
+	if err := LockShared(lockFile); err != nil {
+		lockFile.Close()
+		return nil, err
+	}
+	return lockFile, nil
+}
+
+func (s *store) Close() error {
+	if s.lockFile != nil {
+		Unlock(s.lockFile)
+		s.lockFile.Close()
+	}
+
+	return nil
+}
+
+func (of OSFileSystem) getNewFileId(directory string) (uint32, error) {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return 0, fmt.Errorf("reading the directory: %w", err)
+	}
+	var maxId uint32 = 0
+	foundAny := false
+	for _, entry := range entries {
+		fi, err := entry.Info()
+		if err != nil {
+			return 0, fmt.Errorf("reading the file: %w", err)
+		}
+		if s, f := strings.CutSuffix(fi.Name(), ".data"); f {
+			if id, err := strconv.ParseUint(s, 10, 32); err == nil {
+				foundAny = true
+				if uint32(id) > maxId {
+					maxId = uint32(id)
+				}
+			}
+		}
+	}
+	if foundAny {
+		return maxId + 1, nil
+	}
+	return maxId, nil
+}
 
 func Open(directory string, fileSystem FileSystem, syncOnPut bool) (*Store, error) {
 	if err := validateReadPermission(directory, fileSystem); err != nil {
@@ -112,10 +195,25 @@ func Open(directory string, fileSystem FileSystem, syncOnPut bool) (*Store, erro
 		return nil, err
 	}
 
-	// locking mechanisms?
-	// check op then return appropriate store
+	lockFile, err := fileSystem.acquireExclusiveLock(directory)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire exclusive lock: %w", err)
+	}
+
+	newFileId, err := fileSystem.getNewFileId(directory)
+	if err != nil {
+		return nil, fmt.Errorf("getting a new file Id for store: %w", err)
+	}
+
+	// create the file
+
 	return &Store{
-		store:     &store{DirectoryName: directory, KeyDir: make(map[string]LatestEntryRecord)},
+		store: &store{
+			DirectoryName: directory,
+			KeyDir:        make(map[string]LatestEntryRecord),
+			lockFile:      lockFile,
+			currentFileId: newFileId,
+		},
 		syncOnPut: syncOnPut}, nil
 }
 
@@ -123,8 +221,23 @@ func OpenReadOnly(directory string, fileSystem FileSystem) (*ReadOnlyStore, erro
 	if err := validateReadPermission(directory, fileSystem); err != nil {
 		return nil, err
 	}
+	lockFile, err := fileSystem.acquireSharedLock(directory)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire shared lock: %w", err)
+	}
+
+	newFileId, err := fileSystem.getNewFileId(directory)
+	if err != nil {
+		return nil, fmt.Errorf("getting a new file Id for store: %w", err)
+	}
+
 	return &ReadOnlyStore{
-		store: &store{DirectoryName: directory, KeyDir: make(map[string]LatestEntryRecord)}}, nil
+		store: &store{
+			DirectoryName: directory,
+			KeyDir:        make(map[string]LatestEntryRecord),
+			lockFile:      lockFile,
+			currentFileId: newFileId,
+		}}, nil
 }
 
 func validateReadPermission(directory string, fileSystem FileSystem) error {
@@ -183,11 +296,3 @@ func InitEntry(key, value []byte) []byte {
 
 	return buf
 }
-
-// func (s Store) Get(key string) []byte {
-
-// }
-
-// func (s Store) Set(key string, value []byte) {
-
-// }

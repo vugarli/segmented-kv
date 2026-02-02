@@ -78,6 +78,9 @@ func TestOpen(t *testing.T) {
 				m.RemoveFunc = func(name string) error {
 					return nil
 				}
+				m.acquireExclusiveLockFunc = func(directory string) (*os.File, error) {
+					return nil, nil
+				}
 			},
 		},
 		{
@@ -94,6 +97,9 @@ func TestOpen(t *testing.T) {
 				}
 				m.RemoveFunc = func(name string) error {
 					return nil
+				}
+				m.acquireExclusiveLockFunc = func(directory string) (*os.File, error) {
+					return nil, nil
 				}
 			},
 		},
@@ -181,6 +187,9 @@ func TestOpenReadOnly(t *testing.T) {
 			setupMock: func(m *MockFileSystem) {
 				m.ReadDirFunc = func(name string) ([]fs.DirEntry, error) {
 					return []fs.DirEntry{}, nil
+				}
+				m.acquireSharedLockFunc = func(directory string) (*os.File, error) {
+					return nil, nil
 				}
 			},
 		},
