@@ -3,7 +3,6 @@ package main
 import (
 	"io/fs"
 	"os"
-	"time"
 )
 
 const (
@@ -11,19 +10,31 @@ const (
 	MockLockShr
 )
 
-type MockFileInfo struct {
-	name  string
-	size  int64
-	mode  fs.FileMode
-	isDir bool
+type MockFile struct {
+	Real *os.File
 }
 
-func (m MockFileInfo) Name() string       { return m.name }
-func (m MockFileInfo) Size() int64        { return m.size }
-func (m MockFileInfo) Mode() fs.FileMode  { return m.mode }
-func (m MockFileInfo) ModTime() time.Time { return time.Now() }
-func (m MockFileInfo) IsDir() bool        { return m.isDir }
-func (m MockFileInfo) Sys() interface{}   { return nil }
+func (f MockFile) Write(b []byte) (n int, err error) {
+	// partial write
+	n, err = f.Real.Write(b[:len(b)-2])
+	n -= 2
+	return
+}
+func (f MockFile) Close() error {
+	return f.Real.Close()
+}
+func (m MockFile) Sync() error {
+	return m.Real.Sync()
+}
+func (m MockFile) Read(p []byte) (int, error) {
+	return m.Real.Read(p)
+}
+func (m MockFile) Seek(offset int64, whence int) (int64, error) {
+	return m.Real.Seek(offset, whence)
+}
+func (m MockFile) Truncate(size int64) error {
+	return m.Real.Truncate(size)
+}
 
 type MockFileSystem struct {
 	lockedPathes             map[string]int

@@ -525,6 +525,14 @@ func TestWriteEntry_EdgeCases(t *testing.T) {
 		}
 	})
 
+	t.Run("nil key", func(t *testing.T) {
+		store, _ := setupTestStore(t, false)
+		err := store.Put("", []byte("value"))
+		if err == nil {
+			t.Error("Expected put op to fail for nil key, but didn't fail")
+		}
+	})
+
 	t.Run("multiple writes to same key", func(t *testing.T) {
 		tempDir := t.TempDir()
 		store, _ := Open(tempDir, OSFileSystem{}, false)
@@ -578,4 +586,128 @@ func TestWriteEntry_EdgeCases(t *testing.T) {
 			t.Errorf("expected %d keys, got %d", numWrites, len(store.KeyDir))
 		}
 	})
+
+	t.Run("Partial write gives error, and recovers file", func(t *testing.T) {
+		store, _ := setupTestStore(t, true)
+
+		store.currentFile = MockFile{Real: store.currentFile.(*os.File)}
+
+		err := store.Put("key", []byte("value"))
+
+		if err == nil {
+			t.Error("Expected error from partial write but go no error")
+		}
+		pos, err := store.currentFile.Seek(0, io.SeekCurrent)
+		if pos != 0 {
+			t.Errorf("Expected position to be set to 0, but got %d", pos)
+		}
+
+	})
+}
+
+func TestGet(t *testing.T) {
+	t.Run("Fails get op for nil key", func(t *testing.T) {
+		store, _ := setupTestStore(t, true)
+		key, value := "key", "value"
+
+		writeTestEntry(t, store, key, []byte(value))
+
+		_, err := store.Get("")
+
+		if err == nil {
+			t.Error("Expected get op fail for nil key, but didn't fail")
+		}
+	})
+	t.Run("Successful get op after write op", func(t *testing.T) {
+		store, _ := setupTestStore(t, true)
+		key, value := "key", "value"
+
+		writeTestEntry(t, store, key, []byte(value))
+
+		gotValue, err := store.Get(key)
+
+		if err != nil {
+			t.Errorf("Got unexpected error for Get op: %v", err)
+		}
+
+		if string(gotValue) != value {
+			t.Errorf("Got %s, but expected %s", string(gotValue), value)
+		}
+	})
+	t.Run("Fails to get non-existent key", func(t *testing.T) {
+		store, _ := setupTestStore(t, true)
+		key := "key"
+		_, err := store.Get(key)
+
+		if err == nil {
+			t.Errorf("Expected error, but got none")
+		}
+	})
+	t.Run("Successful get op after overwriting write op", func(t *testing.T) {
+		store, _ := setupTestStore(t, true)
+		key, value := "key", "value"
+
+		updatedValue := "NewValue"
+
+		writeTestEntry(t, store, key, []byte(value))
+		writeTestEntry(t, store, key, []byte(updatedValue))
+
+		gotValue, err := store.Get(key)
+
+		if err != nil {
+			t.Errorf("Got unexpected error for Get op: %v", err)
+		}
+
+		if string(gotValue) != updatedValue {
+			t.Errorf("Got %s, but expected %s", string(gotValue), value)
+		}
+	})
+	t.Run("Fails read op because file corrupted", func(t *testing.T) {
+		store, tempDir := setupTestStore(t, false)
+
+		store.Put("key", []byte("value"))
+		store.Close()
+		dataFile := filepath.Join(tempDir, "0.data")
+		os.Truncate(dataFile, 10)
+
+		store2, err := Open(tempDir, OSFileSystem{}, false)
+		if err != nil {
+			t.Error("Store open failed: %w", err)
+		}
+
+		_, err = store2.Get("key")
+		store2.Close()
+		if err == nil {
+			t.Error("expected error when reading truncated file")
+		}
+	})
+
+	t.Run("get correct values for multiple keys", func(t *testing.T) {
+		store, _ := setupTestStore(t, true)
+
+		kvs := map[string]string{
+			"user1":          "user1",
+			"user2":          "user2",
+			"user3":          strings.Repeat("user", 333),
+			"testingunicode": "🚩",
+			"config:retries": "3",
+		}
+
+		for k, v := range kvs {
+			store.Put(k, []byte(v))
+		}
+
+		for k, want := range kvs {
+			got, err := store.Get(k)
+			if err != nil {
+				t.Errorf("Get(%s) failed: %v", k, err)
+				continue
+			}
+
+			if string(got) != want {
+				t.Errorf("Get(%s) = %s, want %s", k, got, want)
+			}
+		}
+	})
+
 }

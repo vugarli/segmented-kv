@@ -62,21 +62,21 @@ const (
 	KEY_OFFSET        = 20
 )
 
+type FileLike interface {
+	Write([]byte) (int, error)
+	Close() error
+	Sync() error
+	io.ReadWriteCloser
+	io.Seeker
+	Truncate(size int64) error
+}
+
 type LatestEntryRecord struct {
 	FileId    uint32
 	ValueSize uint32
 	ValuePos  uint64
 	Timestamp uint64
 }
-
-// 	Get(key string) ([]byte, error)
-// 	ListKeys() ([]string, error)
-
-// 	Put(key string, value []byte) error
-// 	Delete(key string) error
-// 	Merge(directoryName string) error
-// 	Sync() error
-// 	Close() error
 
 type store struct {
 	DirectoryName string
@@ -85,7 +85,7 @@ type store struct {
 	currentFileId uint32
 	mu            sync.RWMutex
 	fileSystem    FileSystem
-	currentFile   *os.File
+	currentFile   FileLike
 }
 
 type Store struct {
@@ -98,6 +98,10 @@ type ReadOnlyStore struct {
 }
 
 func (s *Store) writeEntry(entry []byte, key string, value []byte, timestamp uint64) error {
+	if key == "" {
+		return fmt.Errorf("Key can't be empty string")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -111,11 +115,23 @@ func (s *Store) writeEntry(entry []byte, key string, value []byte, timestamp uin
 	if err != nil {
 		return fmt.Errorf("getting file position: %w", err)
 	}
+
 	n, err := s.currentFile.Write(entry)
+
 	if err != nil || n != len(entry) {
-		// rollback?
+		truncErr := s.currentFile.Truncate(position)
+		_, seekErr := s.currentFile.Seek(position, io.SeekStart)
+
+		if truncErr != nil || seekErr != nil {
+			return fmt.Errorf(
+				"Write failed and rollback failed: writeErr=%v truncErr=%v seekErr=%v",
+				err, truncErr, seekErr,
+			)
+		}
+
 		return fmt.Errorf("Entry write op failed: %w", err)
 	}
+
 	valuePosition := position + int64(HEADER_SIZE) + int64(len(keyByte))
 
 	s.KeyDir[string(keyByte)] = LatestEntryRecord{
@@ -137,15 +153,52 @@ func (s *Store) writeEntry(entry []byte, key string, value []byte, timestamp uin
 }
 
 func (s *Store) Put(key string, value []byte) error {
+	if key == "" {
+		return fmt.Errorf("Key can't be empty string")
+	}
 	keyByte := []byte(key)
 	timeStamp := uint64(time.Now().Unix())
 	entry := InitEntry(keyByte, []byte(value), timeStamp)
 	return s.writeEntry(entry, key, value, timeStamp)
 }
 
-func (*store) Get(key string) ([]byte, error) {
-	return nil, nil
+func (s *store) Get(key string) ([]byte, error) {
+	if key == "" {
+		return nil, fmt.Errorf("Key can't be empty string")
+	}
+
+	s.mu.RLock()
+	entryRecord, exists := s.KeyDir[key]
+	directoryName := s.DirectoryName
+	s.mu.RUnlock()
+
+	if !exists {
+		return nil, fmt.Errorf("key: %s not found", key)
+	}
+
+	fileName := filepath.Join(directoryName, fmt.Sprintf("%d.data", entryRecord.FileId))
+
+	readFile, err := os.Open(fileName)
+	if err != nil {
+		return nil, fmt.Errorf("opening data file: %w", err)
+	}
+	defer readFile.Close()
+
+	var buf = make([]byte, entryRecord.ValueSize)
+
+	n, err := readFile.ReadAt(buf, int64(entryRecord.ValuePos))
+
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+
+	if n != len(buf) {
+		return nil, io.ErrUnexpectedEOF
+	}
+
+	return buf, nil
 }
+
 func (*store) ListKeys() ([]string, error) {
 	return nil, nil
 }
