@@ -246,3 +246,70 @@ func TestUpdateKeydir(t *testing.T) {
 	}
 
 }
+
+func TestDelete(t *testing.T) {
+	t.Run("Remove entry successfully", func(t *testing.T) {
+
+		entries := []struct {
+			key   string
+			value string
+		}{
+			{key: "key", value: "value1"},
+			{key: "XX", value: "value"},
+			{key: "key", value: "value2"},
+			{key: "XXX", value: "value"},
+			{key: "key", value: "value3"},
+		}
+
+		store, _ := setupTestStore(t, true)
+
+		for i, entry := range entries[:5] {
+			writeTestEntryWithTimeStamp(t, store, entry.key, []byte(entry.value), uint64(i))
+		}
+
+		deletedKey := "key"
+		err := store.Delete(deletedKey)
+		if err != nil {
+			t.Errorf("Failed to delete entry with key:%s", deletedKey)
+		}
+
+		for _, entry := range entries {
+			if entry.key == deletedKey {
+				assertKeyNotInKeyDir(t, store, entry.key)
+			}
+		}
+	})
+	t.Run("Removed entry shouldn't be present when store opens again", func(t *testing.T) {
+		entries := []struct {
+			key   string
+			value string
+		}{
+			{key: "key", value: "value1"},
+			{key: "XX", value: "value"},
+			{key: "key", value: "value2"},
+			{key: "XXX", value: "value"},
+			{key: "key", value: "value3"},
+		}
+
+		store, directory := setupTestStore(t, true)
+
+		for i, entry := range entries[:5] {
+			writeTestEntryWithTimeStamp(t, store, entry.key, []byte(entry.value), uint64(i))
+		}
+		deletedKey := "key"
+		err := store.Delete(deletedKey)
+		if err != nil {
+			t.Errorf("Failed to delete entry with key:%s", deletedKey)
+		}
+
+		store.Close()
+		store = openTestStore(t, true, directory)
+
+		for _, entry := range entries {
+			if entry.key == deletedKey {
+				assertKeyNotInKeyDir(t, store, entry.key)
+			}
+		}
+	})
+
+}

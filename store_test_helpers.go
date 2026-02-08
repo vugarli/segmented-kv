@@ -67,3 +67,11 @@ func assertKeyInKeyDir(t *testing.T, store *Store, key string) LatestEntryRecord
 
 	return record
 }
+
+func assertKeyNotInKeyDir(t *testing.T, store *Store, key string) {
+	t.Helper()
+	_, exists := store.KeyDir[key]
+	if exists {
+		t.Fatalf("unexpected key: %s found in KeyDir", key)
+	}
+}
