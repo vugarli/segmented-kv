@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 func TestPut(t *testing.T) {
@@ -20,11 +19,7 @@ func TestPut(t *testing.T) {
 		directory := t.TempDir()
 		store, _ := Open(directory, mf, true)
 
-		timeStamp := uint64(time.Now().Unix())
-
-		entry := InitEntry([]byte(key), []byte(value), timeStamp)
-
-		if err := store.writeEntry(entry, key, []byte(value), timeStamp); err != nil {
+		if err := store.Put(key, []byte(value)); err != nil {
 			t.Errorf("Write failed %v", err)
 		}
 
@@ -92,13 +87,11 @@ func TestPut(t *testing.T) {
 
 		key := "key"
 
-		entry1 := InitEntry([]byte(key), []byte("value1"), 100)
-		store.writeEntry(entry1, key, []byte("value1"), 100)
+		store.Put(key, []byte("value1"))
 
 		record1 := store.KeyDir[key]
 
-		entry2 := InitEntry([]byte(key), []byte("value2"), 200)
-		store.writeEntry(entry2, key, []byte("value2"), 200)
+		store.Put(key, []byte("value2"))
 
 		record2 := store.KeyDir[key]
 
@@ -106,9 +99,6 @@ func TestPut(t *testing.T) {
 			t.Error("expected different positions for overwrites")
 		}
 
-		if record2.Timestamp != 200 {
-			t.Errorf("timestamp not updated: got %d, want 200", record2.Timestamp)
-		}
 	})
 
 	t.Run("concurrent writes are serialized", func(t *testing.T) {
@@ -125,10 +115,7 @@ func TestPut(t *testing.T) {
 				defer wg.Done()
 				key := fmt.Sprintf("key%d", n)
 				value := []byte(fmt.Sprintf("value%d", n))
-				timestamp := uint64(n)
-				entry := InitEntry([]byte(key), value, timestamp)
-
-				store.writeEntry(entry, key, value, timestamp)
+				store.Put(key, value)
 			}(i)
 		}
 
@@ -157,12 +144,9 @@ func TestWriteEntry_ValuePosition(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.key, func(t *testing.T) {
-			timestamp := uint64(time.Now().Unix())
-			entry := InitEntry([]byte(tt.key), tt.value, timestamp)
-
 			positionBefore, _ := store.currentFile.Seek(0, io.SeekCurrent)
 
-			err := store.writeEntry(entry, tt.key, tt.value, timestamp)
+			err := store.Put(tt.key, tt.value)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -296,6 +280,7 @@ func TestDelete(t *testing.T) {
 		for i, entry := range entries[:5] {
 			writeTestEntryWithTimeStamp(t, store, entry.key, []byte(entry.value), uint64(i))
 		}
+
 		deletedKey := "key"
 		err := store.Delete(deletedKey)
 		if err != nil {

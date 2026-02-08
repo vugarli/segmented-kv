@@ -97,23 +97,19 @@ type ReadOnlyStore struct {
 	*store
 }
 
-func (s *Store) writeEntry(entry []byte, key string, value []byte, timestamp uint64) error {
+func (s *Store) writeEntry(entry []byte, key string, value []byte, timestamp uint64) (*LatestEntryRecord, error) {
 	if key == "" {
-		return fmt.Errorf("Key can't be empty string")
+		return nil, fmt.Errorf("Key can't be empty string")
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.currentFile == nil {
-		return fmt.Errorf("Store file is not initialized")
+		return nil, fmt.Errorf("Store file is not initialized")
 	}
 
 	keyByte := []byte(key)
 
 	position, err := s.currentFile.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return fmt.Errorf("getting file position: %w", err)
+		return nil, fmt.Errorf("getting file position: %w", err)
 	}
 
 	n, err := s.currentFile.Write(entry)
@@ -123,18 +119,23 @@ func (s *Store) writeEntry(entry []byte, key string, value []byte, timestamp uin
 		_, seekErr := s.currentFile.Seek(position, io.SeekStart)
 
 		if truncErr != nil || seekErr != nil {
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"Write failed and rollback failed: writeErr=%v truncErr=%v seekErr=%v",
 				err, truncErr, seekErr,
 			)
 		}
 
-		return fmt.Errorf("Entry write op failed: %w", err)
+		return nil, fmt.Errorf("Entry write op failed: %w", err)
 	}
 
 	valuePosition := position + int64(HEADER_SIZE) + int64(len(keyByte))
 
-	s.KeyDir[string(keyByte)] = LatestEntryRecord{
+	// s.KeyDir[string(keyByte)] = LatestEntryRecord{
+	// 	FileId:    s.currentFileId,
+	// 	ValueSize: uint32(len(value)),
+	// 	ValuePos:  uint64(valuePosition),
+	// 	Timestamp: timestamp}
+	entryRecord := LatestEntryRecord{
 		FileId:    s.currentFileId,
 		ValueSize: uint32(len(value)),
 		ValuePos:  uint64(valuePosition),
@@ -142,13 +143,13 @@ func (s *Store) writeEntry(entry []byte, key string, value []byte, timestamp uin
 
 	if s.syncOnPut {
 		if err := s.currentFile.Sync(); err != nil {
-			return fmt.Errorf("syncing file: %w", err)
+			return nil, fmt.Errorf("syncing file: %w", err)
 		}
 	}
 
 	//TODO file rotation? if bigger than max size
 
-	return nil
+	return &entryRecord, nil
 
 }
 
@@ -196,6 +197,20 @@ func (s *store) updateKeyDir() error {
 	}
 
 	return nil
+}
+
+func isTombStoneEntry(header []byte) (bool, error) {
+	if len(header) < HEADER_SIZE {
+		return false, fmt.Errorf("Wrong entry size")
+	}
+
+	parsedHeader, err := ParseEntryHeader(header)
+	if err != nil {
+		return false, err
+	}
+	timeStamp := parsedHeader.Timestamp
+
+	return timeStamp>>63 == 1 && parsedHeader.ValueSize == 0, nil
 }
 
 func (s *store) loadEntriesFromFile(filePath string) error {
@@ -252,8 +267,17 @@ func (s *store) loadEntriesFromFile(filePath string) error {
 			offset += int64(HEADER_SIZE + dataSize)
 			continue
 		}
-
 		key := string(dataBuf[:entryHeader.KeySize])
+
+		isTomb, err := isTombStoneEntry(fullEntry)
+		if err != nil {
+			fmt.Printf("Error while checking if entry is tombstone entry: %v", err)
+		}
+		if isTomb {
+			delete(s.KeyDir, key)
+			continue
+		}
+
 		valuePos := offset + int64(HEADER_SIZE) + int64(entryHeader.KeySize)
 
 		existing, exists := s.KeyDir[key]
@@ -276,10 +300,20 @@ func (s *Store) Put(key string, value []byte) error {
 	if key == "" {
 		return fmt.Errorf("Key can't be empty string")
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	keyByte := []byte(key)
 	timeStamp := uint64(time.Now().Unix())
 	entry := InitEntry(keyByte, []byte(value), timeStamp)
-	return s.writeEntry(entry, key, value, timeStamp)
+	record, err := s.writeEntry(entry, key, value, timeStamp)
+	if err != nil {
+		return err
+	}
+	s.KeyDir[string(keyByte)] = *record
+
+	return nil
 }
 
 func (s *store) Get(key string) ([]byte, error) {
@@ -323,7 +357,31 @@ func (*store) ListKeys() ([]string, error) {
 	return nil, nil
 }
 
-func (*Store) Delete(key string) error {
+var (
+	ErrKeyNotFound = errors.New("key not found")
+	ErrKeyDeleted  = errors.New("key has been deleted")
+)
+
+func (s *Store) Delete(key string) error {
+	if key == "" {
+		return ErrKeyNotFound
+	}
+
+	_, exists := s.KeyDir[key]
+	if !exists {
+		return ErrKeyNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	timeStamp := uint64(time.Now().Unix())
+	tombStoneEntry := InitTombstoneEntry(key, timeStamp)
+
+	if _, err := s.writeEntry(tombStoneEntry, key, []byte{}, timeStamp); err != nil {
+		return err
+	}
+	delete(s.KeyDir, key)
+
 	return nil
 }
 
@@ -547,5 +605,21 @@ func InitEntry(key, value []byte, timeStamp uint64) []byte {
 	crc := crc32.ChecksumIEEE(buf[CRC_SIZE:])
 	binary.LittleEndian.PutUint32(buf[CRC_OFFSET:], crc)
 
+	return buf
+}
+
+// tombstone entry is regular entry with timestamp's least significant bit set to 1
+func InitTombstoneEntry(key string, timeStamp uint64) []byte {
+	// CRC ModifiedTimeStamp KSZ VSZ(0) K V(nil)
+	totalSize := CRC_SIZE + TSTAMP_SIZE + KEY_SIZE_SIZE + VALUE_SIZE_SIZE + len(key) + 0
+	buf := make([]byte, totalSize)
+	tombStoneTimeStamp := timeStamp | 1<<63
+	binary.LittleEndian.PutUint64(buf[TIMESTAMP_OFFSET:], tombStoneTimeStamp)
+	binary.LittleEndian.PutUint32(buf[KEY_SIZE_OFFSET:], uint32(len(key)))
+	binary.LittleEndian.PutUint32(buf[VALUE_SIZE_OFFSET:], uint32(0))
+	copy(buf[KEY_OFFSET:], key)
+
+	crc := crc32.ChecksumIEEE(buf[CRC_SIZE:])
+	binary.LittleEndian.PutUint32(buf[CRC_OFFSET:], crc)
 	return buf
 }

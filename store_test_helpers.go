@@ -2,7 +2,6 @@ package main
 
 import (
 	"testing"
-	"time"
 )
 
 func openTestStore(t *testing.T, syncOnPut bool, tempDir string) *Store {
@@ -40,10 +39,7 @@ func setupTestStore(t *testing.T, syncOnPut bool) (*Store, string) {
 func writeTestEntry(t *testing.T, store *Store, key string, value []byte) {
 	t.Helper()
 
-	timestamp := uint64(time.Now().Unix())
-	entry := InitEntry([]byte(key), value, timestamp)
-
-	if err := store.writeEntry(entry, key, value, timestamp); err != nil {
+	if err := store.Put(key, value); err != nil {
 		t.Fatalf("writeEntry failed: %v", err)
 	}
 }
@@ -52,9 +48,14 @@ func writeTestEntryWithTimeStamp(t *testing.T, store *Store, key string, value [
 
 	entry := InitEntry([]byte(key), value, timestamp)
 
-	if err := store.writeEntry(entry, key, value, timestamp); err != nil {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	record, err := store.writeEntry(entry, key, value, timestamp)
+
+	if err != nil {
 		t.Fatalf("writeEntry failed: %v", err)
 	}
+	store.KeyDir[key] = *record
 }
 
 func assertKeyInKeyDir(t *testing.T, store *Store, key string) LatestEntryRecord {

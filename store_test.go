@@ -395,8 +395,7 @@ func TestWriteEntry_EdgeCases(t *testing.T) {
 			},
 		}
 
-		entry := InitEntry([]byte("key"), []byte("value"), 123)
-		err := store.writeEntry(entry, "key", []byte("value"), 123)
+		err := store.Put("key", []byte("value"))
 
 		if err == nil {
 			t.Error("expected error with nil currentFile")
@@ -565,7 +564,44 @@ func TestExtractFileId(t *testing.T) {
 	}
 }
 
-func TestLoadEntriesFromFile(t *testing.T) {
-	//
+func TestInitTombstoneEntry(t *testing.T) {
+	key := "key"
+	timeStamp := uint64(time.Now().Unix())
 
+	tombStoneEntry := InitTombstoneEntry(key, timeStamp)
+
+	tombStoneEntryHeader, err := ParseEntryHeader(tombStoneEntry)
+	if err != nil {
+		t.Error("Failed to parse tombstone entry header")
+	}
+
+	gotTimeStamp := tombStoneEntryHeader.Timestamp
+	recoveredTimeStamp := gotTimeStamp ^ 1<<63
+	if recoveredTimeStamp != timeStamp {
+		t.Errorf("Failed to recover timestamp. Expected: %d got %d ", timeStamp, recoveredTimeStamp)
+	}
+
+	recoveredKey := string(tombStoneEntry[tombStoneEntryHeader.KeyOffset : tombStoneEntryHeader.KeyOffset+int(tombStoneEntryHeader.KeySize)])
+	if recoveredKey != key {
+		t.Errorf("Expected key:%s, but got %s", key, recoveredKey)
+	}
+
+	if tombStoneEntryHeader.ValueSize != 0 {
+		t.Error("Tombstone entry value size should be 0")
+	}
+
+}
+
+func TestIsTombStoneEntry(t *testing.T) {
+	key := "key"
+	timeStamp := uint64(time.Now().Unix())
+
+	tombStoneEntry := InitTombstoneEntry(key, timeStamp)
+	b, err := isTombStoneEntry(tombStoneEntry)
+	if err != nil {
+		t.Error("Error while checking entry: %w", err)
+	}
+	if !b {
+		t.Error("Expected entry to be tombstone entry")
+	}
 }
