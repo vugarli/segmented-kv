@@ -146,10 +146,130 @@ func (s *Store) writeEntry(entry []byte, key string, value []byte, timestamp uin
 		}
 	}
 
-	// file rotation? if bigger than max size
+	//TODO file rotation? if bigger than max size
 
 	return nil
 
+}
+
+func extractFileId(a string) (uint32, error) {
+	start := -1
+	end := -1
+
+	for i := 0; i < len(a); i++ {
+		if a[i] >= '0' && a[i] <= '9' {
+			if start == -1 {
+				start = i
+			}
+			end = i + 1
+		} else if start != -1 {
+			break
+		}
+	}
+
+	if start != -1 {
+		digit := a[start:end]
+		num, _ := strconv.Atoi(digit)
+		return uint32(num), nil
+	}
+	return 0, fmt.Errorf("data file format is wrong")
+}
+
+func (s *store) updateKeyDir() error {
+	dirEntries, err := s.fileSystem.ReadDir(s.DirectoryName)
+	if err != nil {
+		return fmt.Errorf("reading store directory: %w", err)
+	}
+	dataFiles := make([]string, 0, len(dirEntries))
+	for _, dirEntry := range dirEntries {
+		if !dirEntry.IsDir() && strings.HasSuffix(dirEntry.Name(), ".data") { //TODO check for current id
+			dataFiles = append(dataFiles, dirEntry.Name())
+		}
+	}
+
+	for _, dataFile := range dataFiles {
+		filepath := filepath.Join(s.DirectoryName, dataFile)
+
+		if err := s.loadEntriesFromFile(filepath); err != nil {
+			fmt.Printf("Warning: error loading %s: %v", dataFile, err)
+		}
+	}
+
+	return nil
+}
+
+func (s *store) loadEntriesFromFile(filePath string) error {
+	filename := filepath.Base(filePath)
+	fileId, err := extractFileId(filename)
+	if err != nil {
+		return fmt.Errorf("extracting file ID from %s: %w", filename, err)
+	}
+
+	file, err := s.fileSystem.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("opening file: %w", err)
+	}
+	defer file.Close()
+
+	offset := int64(0)
+
+	for {
+		headerBuf := make([]byte, HEADER_SIZE)
+		n, err := file.Read(headerBuf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("reading header at offset %d: %w", offset, err)
+		}
+		if n != HEADER_SIZE {
+			fmt.Printf("Warning: incomplete header at offset %d in %s", offset, filePath)
+			break
+		}
+
+		entryHeader, err := ParseEntryHeader(headerBuf)
+		if err != nil {
+			return fmt.Errorf("parsing header at offset %d: %w", offset, err)
+		}
+
+		dataSize := int(entryHeader.KeySize + entryHeader.ValueSize)
+		dataBuf := make([]byte, dataSize)
+		n, err = file.Read(dataBuf)
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("reading entry data at offset %d: %w", offset, err)
+		}
+		if n != dataSize {
+			fmt.Printf("Warning: incomplete entry at offset %d in %s", offset, filePath)
+			break
+		}
+
+		fullEntry := make([]byte, HEADER_SIZE+dataSize)
+		copy(fullEntry, headerBuf)
+		copy(fullEntry[HEADER_SIZE:], dataBuf)
+
+		if err := VerifyEntryCRC(fullEntry); err != nil {
+			fmt.Printf("Warning: CRC mismatch at offset %d in %s", offset, filePath)
+			offset += int64(HEADER_SIZE + dataSize)
+			continue
+		}
+
+		key := string(dataBuf[:entryHeader.KeySize])
+		valuePos := offset + int64(HEADER_SIZE) + int64(entryHeader.KeySize)
+
+		existing, exists := s.KeyDir[key]
+		if !exists || (exists && entryHeader.Timestamp > existing.Timestamp) {
+			s.KeyDir[key] = LatestEntryRecord{
+				FileId:    fileId,
+				ValueSize: entryHeader.ValueSize,
+				ValuePos:  uint64(valuePos),
+				Timestamp: entryHeader.Timestamp,
+			}
+		}
+
+		offset += int64(HEADER_SIZE + dataSize)
+	}
+
+	return nil
 }
 
 func (s *Store) Put(key string, value []byte) error {
@@ -334,7 +454,7 @@ func Open(directory string, fileSystem FileSystem, syncOnPut bool) (*Store, erro
 		return nil, fmt.Errorf("Failed creating initial data file: %w", err)
 	}
 
-	return &Store{
+	store := &Store{
 		store: &store{
 			DirectoryName: directory,
 			KeyDir:        make(map[string]LatestEntryRecord),
@@ -343,7 +463,9 @@ func Open(directory string, fileSystem FileSystem, syncOnPut bool) (*Store, erro
 			fileSystem:    fileSystem,
 			currentFile:   newFile,
 		},
-		syncOnPut: syncOnPut}, nil
+		syncOnPut: syncOnPut}
+
+	return store, store.updateKeyDir()
 }
 
 func OpenReadOnly(directory string, fileSystem FileSystem) (*ReadOnlyStore, error) {
@@ -360,16 +482,16 @@ func OpenReadOnly(directory string, fileSystem FileSystem) (*ReadOnlyStore, erro
 		return nil, fmt.Errorf("getting a new file Id for store: %w", err)
 	}
 
-	//TODO: populate keydir
-
-	return &ReadOnlyStore{
+	store := &ReadOnlyStore{
 		store: &store{
 			DirectoryName: directory,
 			KeyDir:        make(map[string]LatestEntryRecord),
 			lockFile:      lockFile,
 			currentFileId: newFileId,
 			fileSystem:    fileSystem,
-		}}, nil
+		}}
+
+	return store, store.updateKeyDir()
 }
 
 func validateReadPermission(directory string, fileSystem FileSystem) error {

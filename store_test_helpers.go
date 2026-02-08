@@ -5,6 +5,22 @@ import (
 	"time"
 )
 
+func openTestStore(t *testing.T, syncOnPut bool, tempDir string) *Store {
+	t.Helper()
+
+	store, err := Open(tempDir, OSFileSystem{}, syncOnPut)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() {
+		store.Close()
+	})
+
+	return store
+
+}
+
 func setupTestStore(t *testing.T, syncOnPut bool) (*Store, string) {
 	t.Helper()
 
@@ -25,6 +41,15 @@ func writeTestEntry(t *testing.T, store *Store, key string, value []byte) {
 	t.Helper()
 
 	timestamp := uint64(time.Now().Unix())
+	entry := InitEntry([]byte(key), value, timestamp)
+
+	if err := store.writeEntry(entry, key, value, timestamp); err != nil {
+		t.Fatalf("writeEntry failed: %v", err)
+	}
+}
+func writeTestEntryWithTimeStamp(t *testing.T, store *Store, key string, value []byte, timestamp uint64) {
+	t.Helper()
+
 	entry := InitEntry([]byte(key), value, timestamp)
 
 	if err := store.writeEntry(entry, key, value, timestamp); err != nil {
