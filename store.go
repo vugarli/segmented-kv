@@ -80,6 +80,8 @@ type LatestEntryRecord struct {
 	Timestamp uint64
 }
 
+const MAXIMUM_FILE_SIZE = 2 * 1024 * 1024 * 1024 // 2GB
+
 type store struct {
 	DirectoryName string
 	KeyDir        map[string]LatestEntryRecord
@@ -88,6 +90,7 @@ type store struct {
 	mu            sync.RWMutex
 	fileSystem    FileSystem
 	currentFile   FileLike
+	currentSize   uint32
 }
 
 type Store struct {
@@ -315,6 +318,14 @@ func (s *Store) Put(key string, value []byte) error {
 	}
 	s.KeyDir[string(keyByte)] = *record
 
+	s.currentSize += uint32(len(entry))
+
+	if s.currentSize >= MAXIMUM_FILE_SIZE {
+		if err := s.rotateFile(); err != nil {
+			return fmt.Errorf("Warning: File Rotation failed: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -383,12 +394,13 @@ func (s *Store) Delete(key string) error {
 		return ErrKeyNotFound
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	_, exists := s.KeyDir[key]
 	if !exists {
 		return ErrKeyNotFound
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	timeStamp := uint64(time.Now().Unix())
 	tombStoneEntry := InitTombstoneEntry(key, timeStamp)
@@ -402,6 +414,25 @@ func (s *Store) Delete(key string) error {
 }
 
 func (*Store) Merge(directoryName string) error {
+	return nil
+}
+
+func (s *Store) rotateFile() error {
+
+	if s.currentFile != nil {
+		s.currentFile.Sync()
+		s.currentFile.Close()
+	}
+
+	s.currentFileId++
+	s.currentSize = 0
+
+	newFile, err := createNewDataFile(s.currentFileId, s.DirectoryName, s.fileSystem)
+	if err != nil {
+		return err
+	}
+
+	s.currentFile = newFile
 	return nil
 }
 
@@ -496,9 +527,6 @@ func createNewDataFile(newFileId uint32, directory string, fileSystem FileSystem
 	if err != nil {
 		return nil, err
 	}
-	// if f != nil {
-	// 	f.Close()
-	// }
 	return f, nil
 }
 

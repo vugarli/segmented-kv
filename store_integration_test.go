@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -123,6 +124,55 @@ func TestPut(t *testing.T) {
 
 		if len(store.KeyDir) != numWrites {
 			t.Errorf("expected %d keys, got %d", numWrites, len(store.KeyDir))
+		}
+	})
+
+	t.Run("Successful write with correct currentSize", func(t *testing.T) {
+		store, _ := setupTestStore(t, false)
+
+		writeTestEntry(t, store, "key1", []byte("value1"))
+		writeTestEntry(t, store, "key2", []byte("value2"))
+		writeTestEntry(t, store, "key3", []byte("value3"))
+
+		record := assertKeyInKeyDir(t, store, "key1")
+
+		if record.ValueSize != 6 {
+			t.Errorf("wrong ValueSize: got %d, want 6", record.ValueSize)
+		}
+		gotSize := store.currentSize
+		store.Close()
+
+		expectedSize := 3 * (HEADER_SIZE + 4 + 6)
+
+		if uint32(expectedSize) != gotSize {
+			t.Errorf("Store.currentSize is wrong. Expected size: %d, but got %d", expectedSize, gotSize)
+		}
+	})
+}
+
+func TestFileRotation(t *testing.T) {
+	t.Run("successful rotation after size exceeds", func(t *testing.T) {
+		store, directory := setupTestStore(t, false)
+
+		writeTestEntry(t, store, "1gb", make([]byte, 1<<30))
+		writeTestEntry(t, store, "1gb", make([]byte, 1<<30))
+		writeTestEntry(t, store, "1gb", make([]byte, 1<<30))
+
+		if store.currentFileId != 1 {
+			t.Error("Expected file rotation didn't happen.")
+			return
+		}
+
+		store.Close()
+
+		oldFile, _ := os.Stat(path.Join(directory, "0.data"))
+		newFile, _ := os.Stat(path.Join(directory, "1.data"))
+
+		if oldFile.Size() != 1<<31+2*(HEADER_SIZE+3) {
+			t.Errorf("Old data file size is wrong, expected: %d, got: %d", 1<<31, oldFile.Size())
+		}
+		if newFile.Size() != 1<<30+HEADER_SIZE+3 {
+			t.Errorf("New data file size is wrong, expected: %d, got: %d", 1<<30, newFile.Size())
 		}
 	})
 }
