@@ -375,7 +375,7 @@ func TestMerge(t *testing.T) {
 		store.Close()
 
 		// check size to make sure single file compacted
-		fileStat, _ := os.Stat(path.Join(directory, "0.data"))
+		fileStat, _ := os.Stat(path.Join(directory, "2.data"))
 		expectedSize := (HEADER_SIZE * 4) + 12 + 16 + size
 		if expectedSize != int(fileStat.Size()) {
 			t.Errorf("Expected compaction didn't happen. Expected file size:%d, but got:%d", expectedSize, fileStat.Size())
@@ -423,20 +423,21 @@ func TestMerge(t *testing.T) {
 		// inactive: 1.data. 2 key4 entries
 
 		if err := store.Merge(); err != nil {
-			t.Error("Failed to Merge")
+			t.Error("Failed to Merge %w", err)
 		}
 		// remaining files: 2.data, 1.data
 		// 2.data
-		// 1.data 1 key3 + 1 key4 + 3 entries
+		// 3.data 1 key3 + 1 key4 + 3 entries
 		store.Close()
 
 		dirEntries, _ := filepath.Glob(path.Join(directory, "*.data"))
 		assertInList(t, filepath.Join(directory, "2.data"), dirEntries, "Expected %s file in directory, but file were not present")
-		assertInList(t, filepath.Join(directory, "1.data"), dirEntries, "Expected %s file in directory, but file were not present")
+		assertInList(t, filepath.Join(directory, "3.data"), dirEntries, "Expected %s file in directory, but file were not present")
 		assertNotInList(t, filepath.Join(directory, "0.data"), dirEntries, "Didn't expect %s file in directory, but file were present")
+		assertNotInList(t, filepath.Join(directory, "1.data"), dirEntries, "Didn't expect %s file in directory, but file were present")
 
 		data1ExpectedSize := (HEADER_SIZE * 5) + 3 + 2 + 3 + 4 + 4 + (6 + 5 + 5 + size + size2)
-		assertFileSize(t, path.Join(directory, "1.data"), data1ExpectedSize, "Expected compaction didn't happen. Expected file size:%d, but got:%d")
+		assertFileSize(t, path.Join(directory, "3.data"), data1ExpectedSize, "Expected compaction didn't happen. Expected file size:%d, but got:%d")
 
 		data2ExpectedSize := 0
 		assertFileSize(t, path.Join(directory, "2.data"), data2ExpectedSize, "Expected compaction didn't happen. Expected file size:%d, but got:%d")
@@ -452,4 +453,70 @@ func TestMerge(t *testing.T) {
 		assertKeyInKeyDir(t, store, "key4")
 	})
 
+}
+
+func TestReadEntryFunc(t *testing.T) {
+	store, directory := setupTestStore(t, true)
+	defer store.Close()
+
+	entries := []struct {
+		key   string
+		value string
+	}{
+		{"k1", "val1"}, // 20 + 2 + 4 = 26
+		{"k2", "val2"}, // 20 + 2 + 4 = 26
+		{"k3", "val3"}, // 20 + 2 + 4 = 26
+	}
+
+	for _, e := range entries {
+		writeTestEntry(t, store, e.key, []byte(e.value))
+	}
+	store.Close()
+
+	file, err := os.Open(path.Join(directory, "0.data"))
+	if err != nil {
+		t.Fatalf("Failed to open data file: %v", err)
+	}
+	defer file.Close()
+
+	t.Run("read middle entry with correct offset", func(t *testing.T) {
+		offset := uint64(26)
+		entry, err := readEntry(file, offset)
+
+		key, _ := ExtractKey(entry)
+
+		if err != nil {
+			t.Fatalf("Failed to read entry at offset %d: %v", offset, err)
+		}
+		if string(key) != "k2" {
+			t.Errorf("Expected key k2, got %s", string(key))
+		}
+	})
+
+	t.Run("read last entry", func(t *testing.T) {
+		offset := uint64(52)
+		entry, err := readEntry(file, offset)
+		key, _ := ExtractKey(entry)
+
+		if err != nil {
+			t.Fatalf("Failed to read last entry: %v", err)
+		}
+		if string(key) != "k3" {
+			t.Errorf("Expected key k3, got %s", string(key))
+		}
+	})
+
+	t.Run("read beyond file limits", func(t *testing.T) {
+		_, err := readEntry(file, 100)
+		if err == nil {
+			t.Error("Expected error when reading past EOF, got nil")
+		}
+	})
+
+	t.Run("read with corrupted/invalid offset", func(t *testing.T) {
+		_, err := readEntry(file, 5)
+		if err == nil {
+			t.Error("Expected error when reading from an invalid offset, got nil")
+		}
+	})
 }
