@@ -265,7 +265,6 @@ func (s *store) loadEntriesFromFile(filePath string) error {
 
 		dataSize := int(entryHeader.KeySize + entryHeader.ValueSize)
 		dataBuf := make([]byte, dataSize)
-		//n, err = file.Read(dataBuf)
 		n, err = io.ReadFull(file, dataBuf)
 		//TODO check for other Read and replace
 
@@ -431,7 +430,6 @@ func (s *Store) Sync() error {
 
 var (
 	ErrKeyNotFound = errors.New("key not found")
-	ErrKeyDeleted  = errors.New("key has been deleted")
 )
 
 func (s *Store) Delete(key string) error {
@@ -459,18 +457,12 @@ func (s *Store) Delete(key string) error {
 }
 
 func (s *Store) Merge() error {
-	dataFileIds, err := s.getInactiveDataFileIds()
-	if err != nil {
-		return fmt.Errorf("Error while getting inactive data files: %w", err)
-	}
-
 	var entries []MergeEntryRecord
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	for key, record := range maps.All(s.KeyDir) {
-		if slices.Index(dataFileIds, record.FileId) != -1 {
+		if record.FileId != s.currentFileId {
 			entries = append(entries, MergeEntryRecord{
 				Record: record,
 				Key:    key,
@@ -480,28 +472,37 @@ func (s *Store) Merge() error {
 
 	groups := groupEntriesFFD(entries, MAXIMUM_MERGED_FILE_SIZE)
 
-	results, err := writeGroupsToFiles(groups, s.currentFileId+1, s.DirectoryName)
+	//TODO need rollback here
+	results, err := s.writeGroupsToFiles(groups)
 	if err != nil {
 		return fmt.Errorf("Error during writing groups to files:%w", err)
 	}
 	s.updateKeydirFromMergeResults(results)
-	if err := s.cleanJunk(results); err != nil {
+	s.mu.Unlock()
+
+	if err := s.cleanJunk(); err != nil {
 		return fmt.Errorf("Error while cleaning junk data file names:%w", err)
 	}
 	return nil
 }
 
-func (s *store) cleanJunk(results []MergeResult) error {
+// Cleans files that are not present in current KeyDir
+func (s *store) cleanJunk() error {
 	dataIds, err := s.getInactiveDataFileIds()
 	if err != nil {
 		return err
 	}
-	for _, dataId := range dataIds {
-		if dataId > s.currentFileId {
-			continue
+	inUseDataIds := make([]int, 0, 0)
+	for entry := range maps.Values(s.KeyDir) {
+		if slices.Index(inUseDataIds, entry.FileId) == -1 {
+			inUseDataIds = append(inUseDataIds, entry.FileId)
 		}
-		fileName := path.Join(s.DirectoryName, fmt.Sprintf("%d.data", dataId))
-		os.Remove(fileName)
+	}
+	for _, dataId := range dataIds {
+		if slices.Index(inUseDataIds, dataId) == -1 {
+			fileName := path.Join(s.DirectoryName, fmt.Sprintf("%d.data", dataId))
+			os.Remove(fileName)
+		}
 	}
 	return nil
 }
@@ -527,16 +528,17 @@ type MergeResult struct {
 	FileId   int
 }
 
-// Writes groups to .data files. New fileIds gets incremented from current active fileId
-func writeGroupsToFiles(groups [][]MergeEntryRecord, startingFileId int, directory string) ([]MergeResult, error) {
+// Writes groups to .data files. New fileIds gets incremented from currentFileId
+func (s *store) writeGroupsToFiles(groups [][]MergeEntryRecord) ([]MergeResult, error) {
 	var length int
 	for _, v := range groups {
 		length += len(v)
 	}
 	result := make([]MergeResult, 0, length)
+	nextFileId := s.currentFileId + 1
 
 	for _, group := range groups {
-		destinationFileName := path.Join(directory, fmt.Sprintf("%d.data", startingFileId))
+		destinationFileName := path.Join(s.DirectoryName, fmt.Sprintf("%d.data", nextFileId))
 		destinationFile, err := os.OpenFile(destinationFileName, os.O_CREATE|os.O_RDWR, 0644)
 		if err != nil {
 			destinationFile.Close()
@@ -544,7 +546,7 @@ func writeGroupsToFiles(groups [][]MergeEntryRecord, startingFileId int, directo
 		}
 		var currentOffset uint64
 		for _, staleEntry := range group {
-			originFile, err := os.Open(path.Join(directory, fmt.Sprintf("%d.data", staleEntry.Record.FileId)))
+			originFile, err := os.Open(path.Join(s.DirectoryName, fmt.Sprintf("%d.data", staleEntry.Record.FileId)))
 			entry, err := readEntry(originFile, uint64(staleEntry.Record.ValuePos-HEADER_SIZE-uint64(len(staleEntry.Key))))
 			if err != nil {
 				return result, fmt.Errorf("Error while writing groups to file:%v", err)
@@ -559,7 +561,7 @@ func writeGroupsToFiles(groups [][]MergeEntryRecord, startingFileId int, directo
 			result = append(result, MergeResult{
 				Key:      staleEntry.Key,
 				ValuePos: currentOffset + HEADER_SIZE + uint64(len(staleEntry.Key)),
-				FileId:   startingFileId,
+				FileId:   nextFileId,
 			})
 			currentOffset += uint64(len(entry))
 			if err := originFile.Close(); err != nil {
@@ -573,7 +575,7 @@ func writeGroupsToFiles(groups [][]MergeEntryRecord, startingFileId int, directo
 		if err := destinationFile.Close(); err != nil {
 			return result, fmt.Errorf("Error while closing destination file:%w", err)
 		}
-		startingFileId += 1
+		nextFileId += 1
 	}
 	return result, nil
 }
@@ -626,7 +628,6 @@ func groupEntriesFFD(entries []MergeEntryRecord, maxSize int64) [][]MergeEntryRe
 }
 
 func readEntry(reader io.ReaderAt, offset uint64) ([]byte, error) {
-
 	headerBuf := make([]byte, HEADER_SIZE)
 	n, err := reader.ReadAt(headerBuf, int64(offset))
 	if err == io.EOF {
@@ -635,12 +636,10 @@ func readEntry(reader io.ReaderAt, offset uint64) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Read: %d/%d bytes. Reading header at offset %d: %w", n, HEADER_SIZE, offset, err)
 	}
-
 	entryHeader, err := ParseEntryHeader(headerBuf)
 	if err != nil {
 		return nil, fmt.Errorf("parsing header at offset %d: %w", offset, err)
 	}
-
 	dataSize := uint64(entryHeader.KeySize + entryHeader.ValueSize)
 	dataBuf := make([]byte, dataSize)
 	n, err = reader.ReadAt(dataBuf, int64(offset)+HEADER_SIZE)
@@ -650,7 +649,6 @@ func readEntry(reader io.ReaderAt, offset uint64) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Read: %d/%d bytes. Reading entry data at offset %d: %w", n, HEADER_SIZE, offset, err)
 	}
-
 	fullEntry := make([]byte, HEADER_SIZE+dataSize)
 	copy(fullEntry, headerBuf)
 	copy(fullEntry[HEADER_SIZE:], dataBuf)
@@ -658,8 +656,6 @@ func readEntry(reader io.ReaderAt, offset uint64) ([]byte, error) {
 	if err := VerifyEntryCRC(fullEntry); err != nil {
 		return nil, fmt.Errorf("Warning: CRC mismatch at offset %d", offset)
 	}
-	//key := string(dataBuf[:entryHeader.KeySize])
-
 	isTomb, err := isTombStoneEntry(fullEntry)
 	if err != nil {
 		fmt.Printf("Error while checking if entry is tombstone entry: %v", err)
@@ -667,9 +663,6 @@ func readEntry(reader io.ReaderAt, offset uint64) ([]byte, error) {
 	if isTomb {
 		return nil, fmt.Errorf("Entry is tomb entry!")
 	}
-
-	//valuePos := offset + uint64(HEADER_SIZE+entryHeader.KeySize)
-
 	return fullEntry, nil
 }
 
