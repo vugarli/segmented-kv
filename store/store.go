@@ -105,20 +105,10 @@ type store struct {
 	fileSystem    FileSystem
 }
 
-type RWStore interface {
-	RStore
-	Put(key string, value []byte) error
-	Sync() error
-	Delete(key string) error
-	Merge() error
-}
-type RStore interface {
-	Get(key string) ([]byte, error)
-	ListKeys() []string
-	Close() error
-}
+type ROStore struct{ store }
+type RWStore struct{ store }
 
-func Open(directory string, syncOnPut bool) (RWStore, error) {
+func Open(directory string, syncOnPut bool) (*RWStore, error) {
 	if err := validateReadPermission(directory); err != nil {
 		return nil, err
 	}
@@ -148,13 +138,13 @@ func Open(directory string, syncOnPut bool) (RWStore, error) {
 		return nil, fmt.Errorf("Failed creating initial data file: %w", err)
 	}
 
-	store := &store{
+	store := &RWStore{store: store{
 		DirectoryName: directory,
 		KeyDir:        keyDir,
 		lockFile:      lockFile,
 		currentFileId: newFileId,
 		currentFile:   newFile,
-		syncOnPut:     syncOnPut}
+		syncOnPut:     syncOnPut}}
 
 	return store, nil
 }
@@ -167,7 +157,7 @@ func getNewFileId(dataFileIds []int) int {
 	return newFileId
 }
 
-func OpenReadOnly(directory string) (RStore, error) {
+func OpenReadOnly(directory string) (*ROStore, error) {
 	if err := validateReadPermission(directory); err != nil {
 		return nil, err
 	}
@@ -188,12 +178,12 @@ func OpenReadOnly(directory string) (RStore, error) {
 
 	newFileId := getNewFileId(dataFileIds)
 
-	store := &store{
+	store := &ROStore{store: store{
 		DirectoryName: directory,
 		KeyDir:        keyDir,
 		lockFile:      lockFile,
 		currentFileId: newFileId,
-	}
+	}}
 	return store, nil
 }
 
@@ -210,7 +200,7 @@ func (s *store) Close() error {
 	return nil
 }
 
-func (s *store) Put(key string, value []byte) error {
+func (s *RWStore) Put(key string, value []byte) error {
 
 	if err := validatePut(key, value); err != nil {
 		return err
@@ -277,7 +267,7 @@ func (s *store) ListKeys() []string {
 	defer s.mu.RUnlock()
 	return slices.Collect(maps.Keys(s.KeyDir))
 }
-func (s *store) Sync() error {
+func (s *RWStore) Sync() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.currentFile == nil {
@@ -288,7 +278,7 @@ func (s *store) Sync() error {
 	}
 	return nil
 }
-func (s *store) Delete(key string) error {
+func (s *RWStore) Delete(key string) error {
 	if key == "" {
 		return ErrKeyNotFound
 	}
@@ -311,7 +301,7 @@ func (s *store) Delete(key string) error {
 
 	return nil
 }
-func (s *store) Merge() error {
+func (s *RWStore) Merge() error {
 	var entries []MergeEntryRecord
 
 	s.mu.Lock()
@@ -405,7 +395,7 @@ func readEntry(reader io.ReaderAt, offset uint64) ([]byte, *EntryHeader, error) 
 	}
 	return fullEntry, entryHeader, nil
 }
-func (s *store) writeEntry(entry []byte, key string, timestamp uint64) (*EntryRecord, error) {
+func (s *RWStore) writeEntry(entry []byte, key string, timestamp uint64) (*EntryRecord, error) {
 	if key == "" {
 		return nil, fmt.Errorf("Key can't be empty string")
 	}
@@ -563,7 +553,7 @@ func loadKeyDirFromFile(filePath string, keyDir map[string]EntryRecord) error {
 }
 
 // Cleans files that are not present in current KeyDir
-func (s *store) cleanJunk() error {
+func (s *RWStore) cleanJunk() error {
 	dataIds, err := inactiveFileIds(s.DirectoryName, s.currentFileId)
 	if err != nil {
 		return err
@@ -584,7 +574,7 @@ func (s *store) cleanJunk() error {
 	}
 	return nil
 }
-func (s *store) updateKeydirFromMergeResults(results []MergeResult) {
+func (s *RWStore) updateKeydirFromMergeResults(results []MergeResult) {
 	for _, result := range results {
 		entry, e := s.KeyDir[result.Key]
 		if e {
@@ -639,7 +629,7 @@ func groupEntriesFFD(entries []MergeEntryRecord, maxSize int64) [][]MergeEntryRe
 }
 
 // Writes groups to .data files. New fileIds gets incremented from currentFileId
-func (s *store) saveGroups(groups [][]MergeEntryRecord) ([]MergeResult, error) {
+func (s *RWStore) saveGroups(groups [][]MergeEntryRecord) ([]MergeResult, error) {
 	var length int
 	for _, v := range groups {
 		length += len(v)
@@ -656,7 +646,7 @@ func (s *store) saveGroups(groups [][]MergeEntryRecord) ([]MergeResult, error) {
 	}
 	return result, nil
 }
-func (s *store) saveGroupToFile(group []MergeEntryRecord, fileId int) ([]MergeResult, error) {
+func (s *RWStore) saveGroupToFile(group []MergeEntryRecord, fileId int) ([]MergeResult, error) {
 	destinationFileName := path.Join(s.DirectoryName, fmt.Sprintf("%d.data", fileId))
 	destinationFile, err := os.OpenFile(destinationFileName, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
@@ -728,7 +718,7 @@ func inactiveFileIds(directory string, currentFileId int) ([]int, error) {
 	return inactive, nil
 }
 
-func (s *store) rotateFile() error {
+func (s *RWStore) rotateFile() error {
 
 	if s.currentFile != nil {
 		if err := s.currentFile.Sync(); err != nil {

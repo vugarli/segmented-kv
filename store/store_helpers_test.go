@@ -8,14 +8,22 @@ import (
 	"testing"
 )
 
-func openTestStore(t *testing.T, syncOnPut bool, tempDir string) *store {
+func openTestROStore(t *testing.T, tempDir string) *ROStore {
 	t.Helper()
 
-	stores, err := Open(tempDir, syncOnPut)
-	store := Unwrap(stores)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, _ := OpenReadOnly(tempDir)
+
+	t.Cleanup(func() {
+		store.Close()
+	})
+
+	return store
+
+}
+func openTestRWStore(t *testing.T, syncOnPut bool, tempDir string) *RWStore {
+	t.Helper()
+
+	store, _ := Open(tempDir, syncOnPut)
 
 	t.Cleanup(func() {
 		store.Close()
@@ -25,15 +33,23 @@ func openTestStore(t *testing.T, syncOnPut bool, tempDir string) *store {
 
 }
 
-func setupTestStore(t *testing.T, syncOnPut bool) (*store, string) {
+func setupRWTestStore(t *testing.T, syncOnPut bool) (*RWStore, string) {
 	t.Helper()
 
 	tempDir := t.TempDir()
-	stores, err := Open(tempDir, syncOnPut)
-	store := Unwrap(stores)
-	if err != nil {
-		t.Fatal(err)
-	}
+	store, _ := Open(tempDir, syncOnPut)
+
+	t.Cleanup(func() {
+		store.Close()
+	})
+
+	return store, tempDir
+}
+func setupROTestStore(t *testing.T, syncOnPut bool) (*ROStore, string) {
+	t.Helper()
+
+	tempDir := t.TempDir()
+	store, _ := OpenReadOnly(tempDir)
 
 	t.Cleanup(func() {
 		store.Close()
@@ -62,14 +78,14 @@ func assertNotInList[T comparable](t *testing.T, entry T, list []T, message stri
 
 // Warning! During testing, generated timestamps will be same. Because of this, stale, and updated entries will be treated as same.
 // Use writeTestEntryWithTimeStamp tp have sequential entry timestamps
-func writeTestEntry(t *testing.T, store *store, key string, value []byte) {
+func writeTestEntry(t *testing.T, store *RWStore, key string, value []byte) {
 	t.Helper()
 
 	if err := store.Put(key, value); err != nil {
 		t.Fatalf("writeEntry failed: %v", err)
 	}
 }
-func writeTestEntryWithTimeStamp(t *testing.T, store *store, key string, value []byte, timestamp uint64) {
+func writeTestEntryWithTimeStamp(t *testing.T, store *RWStore, key string, value []byte, timestamp uint64) {
 	t.Helper()
 
 	entry := initEntry([]byte(key), value, timestamp)
@@ -102,7 +118,7 @@ func assertKeyInKeyDir(t *testing.T, store *store, key string) EntryRecord {
 // keySuffix is keyvalue that will be used for entries. In the case of isTemp false entry keys are formatted: %dkeySuffix
 //
 // Returns: number of entries inserted, and latest written entry key
-func ensureFileRotationHappens(t *testing.T, store *store, isTemp bool, keySuffix string) (uint32, int) {
+func ensureFileRotationHappens(t *testing.T, store *RWStore, isTemp bool, keySuffix string) (uint32, int) {
 	sizeOfEntryValue := 1 << 30 // 1GB
 	temp := float64(MAXIMUM_FILE_SIZE-store.currentSize) / float64(sizeOfEntryValue)
 	numberOfEntriesNeeded := math.Ceil(temp)

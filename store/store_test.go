@@ -126,7 +126,7 @@ func TestOpen(t *testing.T) {
 
 			tt.setupMock(mockFS)
 
-			store, err := OpenTest(tt.path, tt.syncOnPut)
+			store, err := Open(tt.path, tt.syncOnPut)
 
 			if tt.expectedError != nil {
 				if err == nil {
@@ -222,7 +222,7 @@ func TestOpenReadOnly(t *testing.T) {
 
 			tt.setupMock(mockFS)
 
-			store, err := OpenReadOnlyTest(tt.path)
+			store, err := OpenReadOnly(tt.path)
 
 			if tt.expectedError != nil {
 				if err == nil {
@@ -403,10 +403,10 @@ func TestEntryParsing(t *testing.T) {
 
 func TestWriteEntry_EdgeCases(t *testing.T) {
 	t.Run("nil currentFile", func(t *testing.T) {
-		store := &store{
+		store := &RWStore{store: store{
 			currentFile: nil,
 			KeyDir:      make(map[string]EntryRecord),
-		}
+		}}
 
 		err := store.Put("key", []byte("value"))
 
@@ -416,7 +416,7 @@ func TestWriteEntry_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("nil key", func(t *testing.T) {
-		store, _ := setupTestStore(t, false)
+		store, _ := setupRWTestStore(t, false)
 		err := store.Put("", []byte("value"))
 		if err == nil {
 			t.Error("Expected put op to fail for nil key, but didn't fail")
@@ -424,7 +424,7 @@ func TestWriteEntry_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("Partial write gives error, and recovers file", func(t *testing.T) {
-		store, _ := setupTestStore(t, true)
+		store, _ := setupRWTestStore(t, true)
 
 		store.currentFile = MockFile{Real: store.currentFile.(*os.File)}
 
@@ -443,7 +443,7 @@ func TestWriteEntry_EdgeCases(t *testing.T) {
 
 func TestGet(t *testing.T) {
 	t.Run("Fails get op for nil key", func(t *testing.T) {
-		store, _ := setupTestStore(t, true)
+		store, _ := setupRWTestStore(t, true)
 		key, value := "key", "value"
 
 		writeTestEntry(t, store, key, []byte(value))
@@ -455,7 +455,7 @@ func TestGet(t *testing.T) {
 		}
 	})
 	t.Run("Successful get op after write op", func(t *testing.T) {
-		store, _ := setupTestStore(t, true)
+		store, _ := setupRWTestStore(t, true)
 		key, value := "key", "value"
 
 		writeTestEntry(t, store, key, []byte(value))
@@ -471,7 +471,7 @@ func TestGet(t *testing.T) {
 		}
 	})
 	t.Run("Fails to get non-existent key", func(t *testing.T) {
-		store, _ := setupTestStore(t, true)
+		store, _ := setupRWTestStore(t, true)
 		key := "key"
 		_, err := store.Get(key)
 
@@ -480,7 +480,7 @@ func TestGet(t *testing.T) {
 		}
 	})
 	t.Run("Successful get op after overwriting write op", func(t *testing.T) {
-		store, _ := setupTestStore(t, true)
+		store, _ := setupRWTestStore(t, true)
 		key, value := "key", "value"
 
 		updatedValue := "NewValue"
@@ -499,7 +499,7 @@ func TestGet(t *testing.T) {
 		}
 	})
 	t.Run("Fails read op because file corrupted", func(t *testing.T) {
-		store, tempDir := setupTestStore(t, false)
+		store, tempDir := setupRWTestStore(t, false)
 
 		store.Put("key", []byte("value"))
 		store.Close()
@@ -519,7 +519,7 @@ func TestGet(t *testing.T) {
 	})
 
 	t.Run("get correct values for multiple keys", func(t *testing.T) {
-		store, _ := setupTestStore(t, true)
+		store, _ := setupRWTestStore(t, true)
 
 		kvs := map[string]string{
 			"user1":          "user1",
@@ -628,7 +628,7 @@ func TestListKeys(t *testing.T) {
 		fileSystem = tempFs
 	}()
 
-	store, _ := OpenTest(".", false)
+	store := openTestROStore(t, ".")
 	entries := []struct {
 		key string
 	}{
