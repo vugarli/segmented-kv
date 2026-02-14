@@ -164,9 +164,8 @@ func TestFileRotation(t *testing.T) {
 			return
 		}
 
-		store.Close()
-
 		oldFile, _ := os.Stat(path.Join(directory, "0.data"))
+		store.Close()
 		newFile, _ := os.Stat(path.Join(directory, "1.data"))
 
 		if oldFile.Size() != 1<<31+2*(HEADER_SIZE+3) {
@@ -279,7 +278,7 @@ func TestUpdateKeydir(t *testing.T) {
 		}
 
 	}
-
+	rwstore.Close()
 }
 
 func TestDelete(t *testing.T) {

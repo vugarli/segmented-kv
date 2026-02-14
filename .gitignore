@@ -6,6 +6,7 @@
 
 *.test
 
+__debug_bin.*
 
 *.out
 coverage.*

@@ -100,6 +100,46 @@ type store struct {
 	currentSize   uint32
 	syncOnPut     bool
 	fileSystem    FileSystem
+	readFileCache fileHandlerCache
+}
+
+type fileHandlerCache struct {
+	mu    sync.Mutex
+	cache map[int]*os.File
+}
+
+func (fh *fileHandlerCache) get(directory string, id int) (*os.File, error) {
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+
+	if file, exists := fh.cache[id]; exists {
+		return file, nil
+	}
+
+	file, err := os.Open(filepath.Join(directory, fmt.Sprintf("%d.data", id)))
+	if err != nil {
+		return nil, err
+	}
+	fh.cache[id] = file
+	return file, nil
+}
+
+func (fh *fileHandlerCache) evict(id int) {
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	if f, exist := fh.cache[id]; exist {
+		f.Close()
+		delete(fh.cache, id)
+	}
+}
+
+func (fh *fileHandlerCache) evictall() {
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	for id, f := range maps.All(fh.cache) {
+		f.Close()
+		delete(fh.cache, id)
+	}
 }
 
 type ROStore struct{ *store }
@@ -117,7 +157,8 @@ func Open(directory string, syncOnPut bool, options ...option) (*RWStore, error)
 	s := &store{
 		DirectoryName: directory,
 		syncOnPut:     syncOnPut,
-		fileSystem:    OSFileSystem{}}
+		fileSystem:    OSFileSystem{},
+		readFileCache: fileHandlerCache{cache: make(map[int]*os.File, 0)}}
 
 	if len(options) != 0 {
 		for _, o := range options {
@@ -172,7 +213,7 @@ func getNewFileId(dataFileIds []int) int {
 }
 
 func OpenReadOnly(directory string, options ...option) (*ROStore, error) {
-	s := &store{DirectoryName: directory, fileSystem: OSFileSystem{}}
+	s := &store{DirectoryName: directory, fileSystem: OSFileSystem{}, readFileCache: fileHandlerCache{cache: make(map[int]*os.File, 0)}}
 
 	if len(options) != 0 {
 		for _, o := range options {
@@ -212,12 +253,11 @@ func (s *store) Close() error {
 		Unlock(s.lockFile)
 		s.lockFile.Close()
 	}
-
 	if s.currentFile != nil {
 		s.currentFile.Close()
 	}
-
-	return nil
+	s.readFileCache.evictall()
+	return s.cleanJunk()
 }
 
 func (s *RWStore) Put(key string, value []byte) error {
@@ -260,13 +300,16 @@ func (s *store) Get(key string) ([]byte, error) {
 		return nil, fmt.Errorf("key: %s not found", key)
 	}
 
-	fileName := filepath.Join(directoryName, fmt.Sprintf("%d.data", entryRecord.FileId))
-
-	readFile, err := os.Open(fileName)
+	readFile, err := s.readFileCache.get(directoryName, entryRecord.FileId)
 	if err != nil {
 		return nil, fmt.Errorf("opening data file: %w", err)
 	}
-	defer readFile.Close()
+	// fileName := filepath.Join(directoryName, fmt.Sprintf("%d.data", entryRecord.FileId))
+	// readFile, err := os.Open(fileName)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("opening data file: %w", err)
+	// }
+	// defer readFile.Close()
 
 	var buf = make([]byte, entryRecord.ValueSize)
 
@@ -523,6 +566,8 @@ func loadKeyDirFromFile(filePath string, keyDir map[string]EntryRecord) error {
 		return fmt.Errorf("extracting file ID from %s: %w", filename, err)
 	}
 
+	//cache
+
 	file, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("opening file: %w", err)
@@ -574,7 +619,7 @@ func loadKeyDirFromFile(filePath string, keyDir map[string]EntryRecord) error {
 }
 
 // Cleans files that are not present in current KeyDir
-func (s *RWStore) cleanJunk() error {
+func (s *store) cleanJunk() error {
 	dataIds, err := inactiveFileIds(s.DirectoryName, s.currentFileId, s.fileSystem)
 	if err != nil {
 		return err
@@ -590,6 +635,7 @@ func (s *RWStore) cleanJunk() error {
 		_, exists := inUseDataIds[dataId]
 		if !exists {
 			fileName := filepath.Join(s.DirectoryName, fmt.Sprintf("%d.data", dataId))
+			s.readFileCache.evict(dataId)
 			s.fileSystem.Remove(fileName)
 		}
 	}
