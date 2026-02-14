@@ -10,7 +10,6 @@ import (
 	"maps"
 	"math"
 	"os"
-	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -19,8 +18,6 @@ import (
 	"syscall"
 	"time"
 )
-
-var fileSystem FileSystem = OSFileSystem{}
 
 const (
 	KEY_SIZE_SIZE   = 4
@@ -105,23 +102,43 @@ type store struct {
 	fileSystem    FileSystem
 }
 
-type ROStore struct{ store }
-type RWStore struct{ store }
+type ROStore struct{ *store }
+type RWStore struct{ *store }
 
-func Open(directory string, syncOnPut bool) (*RWStore, error) {
-	if err := validateReadPermission(directory); err != nil {
+type option func(*store)
+
+func withOsFileSystem(store *store) {
+	if store != nil {
+		store.fileSystem = OSFileSystem{}
+	}
+}
+
+func Open(directory string, syncOnPut bool, options ...option) (*RWStore, error) {
+	s := &store{
+		DirectoryName: directory,
+		syncOnPut:     syncOnPut,
+		fileSystem:    OSFileSystem{}}
+
+	if len(options) != 0 {
+		for _, o := range options {
+			o(s)
+		}
+	}
+
+	if err := validateReadPermission(directory, s.fileSystem); err != nil {
 		return nil, err
 	}
-	if err := validateWritePermission(directory); err != nil {
+	if err := validateWritePermission(directory, s.fileSystem); err != nil {
 		return nil, err
 	}
 
-	lockFile, err := fileSystem.acquireExclusiveLock(directory)
+	lockFile, err := s.fileSystem.acquireExclusiveLock(directory)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire exclusive lock: %w", err)
 	}
+	s.lockFile = lockFile
 
-	dataFileIds, err := fileIds(directory)
+	dataFileIds, err := fileIds(directory, s.fileSystem)
 	if err != nil {
 		return nil, fmt.Errorf("Error while getting dataFileIds in dir:%s :%w", directory, err)
 	}
@@ -130,21 +147,18 @@ func Open(directory string, syncOnPut bool) (*RWStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Error while getting keyDir in dir:%s :%w", directory, err)
 	}
+	s.KeyDir = keyDir
 
 	newFileId := getNewFileId(dataFileIds)
+	s.currentFileId = newFileId
 
-	newFile, err := createNewDataFile(newFileId, directory)
+	newFile, err := createNewDataFile(newFileId, directory, s.fileSystem)
 	if err != nil {
 		return nil, fmt.Errorf("Failed creating initial data file: %w", err)
 	}
+	s.currentFile = newFile
 
-	store := &RWStore{store: store{
-		DirectoryName: directory,
-		KeyDir:        keyDir,
-		lockFile:      lockFile,
-		currentFileId: newFileId,
-		currentFile:   newFile,
-		syncOnPut:     syncOnPut}}
+	store := &RWStore{store: s}
 
 	return store, nil
 }
@@ -157,16 +171,25 @@ func getNewFileId(dataFileIds []int) int {
 	return newFileId
 }
 
-func OpenReadOnly(directory string) (*ROStore, error) {
-	if err := validateReadPermission(directory); err != nil {
+func OpenReadOnly(directory string, options ...option) (*ROStore, error) {
+	s := &store{DirectoryName: directory, fileSystem: OSFileSystem{}}
+
+	if len(options) != 0 {
+		for _, o := range options {
+			o(s)
+		}
+	}
+
+	if err := validateReadPermission(directory, s.fileSystem); err != nil {
 		return nil, err
 	}
-	lockFile, err := fileSystem.acquireSharedLock(directory)
+	lockFile, err := s.fileSystem.acquireSharedLock(directory)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire shared lock: %w", err)
 	}
+	s.lockFile = lockFile
 
-	dataFileIds, err := fileIds(directory)
+	dataFileIds, err := fileIds(directory, s.fileSystem)
 	if err != nil {
 		return nil, fmt.Errorf("Error while getting dataFileIds in dir:%s :%w", directory, err)
 	}
@@ -175,15 +198,12 @@ func OpenReadOnly(directory string) (*ROStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Error while getting keyDir in dir:%s :%w", directory, err)
 	}
+	s.KeyDir = keyDir
 
 	newFileId := getNewFileId(dataFileIds)
+	s.currentFileId = newFileId
 
-	store := &ROStore{store: store{
-		DirectoryName: directory,
-		KeyDir:        keyDir,
-		lockFile:      lockFile,
-		currentFileId: newFileId,
-	}}
+	store := &ROStore{store: s}
 	return store, nil
 }
 
@@ -412,6 +432,7 @@ func (s *RWStore) writeEntry(entry []byte, key string, timestamp uint64) (*Entry
 
 	n, err := s.currentFile.Write(entry)
 
+	// write failed restore seek to old position
 	if err != nil || n != len(entry) {
 		truncErr := s.currentFile.Truncate(position)
 		_, seekErr := s.currentFile.Seek(position, io.SeekStart)
@@ -554,7 +575,7 @@ func loadKeyDirFromFile(filePath string, keyDir map[string]EntryRecord) error {
 
 // Cleans files that are not present in current KeyDir
 func (s *RWStore) cleanJunk() error {
-	dataIds, err := inactiveFileIds(s.DirectoryName, s.currentFileId)
+	dataIds, err := inactiveFileIds(s.DirectoryName, s.currentFileId, s.fileSystem)
 	if err != nil {
 		return err
 	}
@@ -568,8 +589,8 @@ func (s *RWStore) cleanJunk() error {
 	for _, dataId := range dataIds {
 		_, exists := inUseDataIds[dataId]
 		if !exists {
-			fileName := path.Join(s.DirectoryName, fmt.Sprintf("%d.data", dataId))
-			fileSystem.Remove(fileName)
+			fileName := filepath.Join(s.DirectoryName, fmt.Sprintf("%d.data", dataId))
+			s.fileSystem.Remove(fileName)
 		}
 	}
 	return nil
@@ -647,7 +668,7 @@ func (s *RWStore) saveGroups(groups [][]MergeEntryRecord) ([]MergeResult, error)
 	return result, nil
 }
 func (s *RWStore) saveGroupToFile(group []MergeEntryRecord, fileId int) ([]MergeResult, error) {
-	destinationFileName := path.Join(s.DirectoryName, fmt.Sprintf("%d.data", fileId))
+	destinationFileName := filepath.Join(s.DirectoryName, fmt.Sprintf("%d.data", fileId))
 	destinationFile, err := os.OpenFile(destinationFileName, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("opening destination file: %w", err)
@@ -657,7 +678,7 @@ func (s *RWStore) saveGroupToFile(group []MergeEntryRecord, fileId int) ([]Merge
 	result := make([]MergeResult, 0, len(group))
 	var currentOffset uint64
 	for _, staleEntry := range group {
-		originFile, err := os.Open(path.Join(s.DirectoryName, fmt.Sprintf("%d.data", staleEntry.Record.FileId)))
+		originFile, err := os.Open(filepath.Join(s.DirectoryName, fmt.Sprintf("%d.data", staleEntry.Record.FileId)))
 		if err != nil {
 			return nil, fmt.Errorf("opening origin file: %w", err)
 		}
@@ -686,7 +707,7 @@ func (s *RWStore) saveGroupToFile(group []MergeEntryRecord, fileId int) ([]Merge
 	return result, nil
 }
 
-func fileIds(directory string) ([]int, error) {
+func fileIds(directory string, fileSystem FileSystem) ([]int, error) {
 	dirEntries, err := fileSystem.ReadDir(directory)
 	if err != nil {
 		return nil, err
@@ -704,8 +725,8 @@ func fileIds(directory string) ([]int, error) {
 	}
 	return ids, nil
 }
-func inactiveFileIds(directory string, currentFileId int) ([]int, error) {
-	ids, err := fileIds(directory)
+func inactiveFileIds(directory string, currentFileId int, fileSystem FileSystem) ([]int, error) {
+	ids, err := fileIds(directory, fileSystem)
 	if err != nil {
 		return nil, err
 	}
@@ -724,14 +745,13 @@ func (s *RWStore) rotateFile() error {
 		if err := s.currentFile.Sync(); err != nil {
 			return fmt.Errorf("failed to rotate current file. Sync error:%w", err)
 		}
-
 		s.currentFile.Close()
 	}
 
 	s.currentFileId++
 	s.currentSize = 0
 
-	newFile, err := createNewDataFile(s.currentFileId, s.DirectoryName)
+	newFile, err := createNewDataFile(s.currentFileId, s.DirectoryName, s.fileSystem)
 	if err != nil {
 		return err
 	}
@@ -739,7 +759,7 @@ func (s *RWStore) rotateFile() error {
 	s.currentFile = newFile
 	return nil
 }
-func createNewDataFile(newFileId int, directory string) (*os.File, error) {
+func createNewDataFile(newFileId int, directory string, fileSystem FileSystem) (*os.File, error) {
 	newFilePath := filepath.Join(directory, fmt.Sprintf("%d.data", newFileId))
 	f, err := fileSystem.Create(newFilePath)
 	if err != nil {
@@ -777,7 +797,7 @@ func validatePut(key string, value []byte) error {
 	return nil
 }
 
-func validateReadPermission(directory string) error {
+func validateReadPermission(directory string, fileSystem FileSystem) error {
 	_, err := fileSystem.ReadDir(directory)
 	if err != nil {
 		switch {
@@ -793,7 +813,7 @@ func validateReadPermission(directory string) error {
 	}
 	return nil
 }
-func validateWritePermission(directory string) error {
+func validateWritePermission(directory string, fileSystem FileSystem) error {
 	tmpFile, err := fileSystem.CreateTemp(directory, ".storecheck-*")
 	if err != nil {
 		switch {

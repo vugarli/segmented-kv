@@ -49,7 +49,7 @@ func TestPut(t *testing.T) {
 		writeTestEntry(t, store, "key1", []byte("value1"))
 		writeTestEntry(t, store, "key2", []byte("value2"))
 
-		record := assertKeyInKeyDir(t, &store.store, "key1")
+		record := assertKeyInKeyDir(t, store.store, "key1")
 
 		if record.ValueSize != 6 {
 			t.Errorf("wrong ValueSize: got %d, want 6", record.ValueSize)
@@ -135,7 +135,7 @@ func TestPut(t *testing.T) {
 		writeTestEntry(t, store, "key2", []byte("value2"))
 		writeTestEntry(t, store, "key3", []byte("value3"))
 
-		record := assertKeyInKeyDir(t, &store.store, "key1")
+		record := assertKeyInKeyDir(t, store.store, "key1")
 
 		if record.ValueSize != 6 {
 			t.Errorf("wrong ValueSize: got %d, want 6", record.ValueSize)
@@ -239,22 +239,22 @@ func TestUpdateKeydir(t *testing.T) {
 		{key: "key", value: "value4", expected: "value4", pos: 51},
 	}
 
-	store, directory := setupRWTestStore(t, true)
+	rwstore, directory := setupRWTestStore(t, true)
 
 	for i, entry := range entries[:5] {
-		writeTestEntryWithTimeStamp(t, store, entry.key, []byte(entry.value), uint64(i))
+		writeTestEntryWithTimeStamp(t, rwstore, entry.key, []byte(entry.value), uint64(i))
 	}
 
-	store.Close()
+	rwstore.Close()
 
-	store = openTestRWStore(t, true, directory)
+	rwstore = openTestRWStore(t, true, directory)
 
 	for _, entry := range entries[:5] {
-		record := assertKeyInKeyDir(t, &store.store, entry.key)
+		record := assertKeyInKeyDir(t, rwstore.store, entry.key)
 		if record.ValuePos != entry.pos {
 			t.Errorf("Value position is wrong for %s. Expected %d but found %d", entry.key, record.ValuePos, uint64(HEADER_SIZE+len(entry.key)))
 		}
-		value, err := store.Get(entry.key)
+		value, err := rwstore.Get(entry.key)
 		if err != nil {
 			t.Errorf("Error %v", err)
 		}
@@ -265,12 +265,12 @@ func TestUpdateKeydir(t *testing.T) {
 	}
 
 	for i, entry := range entries[5:] {
-		writeTestEntryWithTimeStamp(t, store, entry.key, []byte(entry.value), uint64(i))
+		writeTestEntryWithTimeStamp(t, rwstore, entry.key, []byte(entry.value), uint64(i))
 	}
 
 	for _, entry := range entries[5:] {
-		assertKeyInKeyDir(t, &store.store, entry.key)
-		value, err := store.Get(entry.key)
+		assertKeyInKeyDir(t, rwstore.store, entry.key)
+		value, err := rwstore.Get(entry.key)
 		if err != nil {
 			t.Errorf("Error %v", err)
 		}
@@ -310,7 +310,7 @@ func TestDelete(t *testing.T) {
 
 		for _, entry := range entries {
 			if entry.key == deletedKey {
-				assertKeyNotInKeyDir(t, &store.store, entry.key)
+				assertKeyNotInKeyDir(t, store.store, entry.key)
 			}
 		}
 	})
@@ -343,7 +343,7 @@ func TestDelete(t *testing.T) {
 
 		for _, entry := range entries {
 			if entry.key == deletedKey {
-				assertKeyNotInKeyDir(t, &store.store, entry.key)
+				assertKeyNotInKeyDir(t, store.store, entry.key)
 			}
 		}
 	})
@@ -391,10 +391,10 @@ func TestMerge(t *testing.T) {
 		// test only updated entries remain
 		store = openTestRWStore(t, true, directory)
 
-		assertEntryExistsKeyValue(t, &store.store, "key", "value3")
-		assertEntryExistsKeyValue(t, &store.store, "XX", "value")
-		assertEntryExistsKeyValue(t, &store.store, "XXX", "value")
-		assertKeyInKeyDir(t, &store.store, "key3")
+		assertEntryExistsKeyValue(t, store.store, "key", "value3")
+		assertEntryExistsKeyValue(t, store.store, "XX", "value")
+		assertEntryExistsKeyValue(t, store.store, "XXX", "value")
+		assertKeyInKeyDir(t, store.store, "key3")
 	})
 
 	t.Run("Succsessfully compacts MULTIPLE FILES TO SINGLE FILE by removing stale entries", func(t *testing.T) {
@@ -446,12 +446,12 @@ func TestMerge(t *testing.T) {
 		// test only updated entries remain
 		store = openTestRWStore(t, true, directory)
 
-		assertEntryExistsKeyValue(t, &store.store, "key", "value3")
-		assertEntryExistsKeyValue(t, &store.store, "XX", "value")
-		assertEntryExistsKeyValue(t, &store.store, "XXX", "value")
+		assertEntryExistsKeyValue(t, store.store, "key", "value3")
+		assertEntryExistsKeyValue(t, store.store, "XX", "value")
+		assertEntryExistsKeyValue(t, store.store, "XXX", "value")
 		//assertEntryExistsKeyValue(t, store, "key3", strings.Repeat("\x00", size))
-		assertKeyInKeyDir(t, &store.store, "key3")
-		assertKeyInKeyDir(t, &store.store, "key4")
+		assertKeyInKeyDir(t, store.store, "key3")
+		assertKeyInKeyDir(t, store.store, "key4")
 	})
 
 }

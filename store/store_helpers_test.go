@@ -8,10 +8,21 @@ import (
 	"testing"
 )
 
-func openTestROStore(t *testing.T, tempDir string) *ROStore {
+func withMockFS(s *store) {
+	if s != nil {
+		s.fileSystem = MockFileSystem{}
+	}
+}
+func withFileSystem(fs FileSystem) option {
+	return func(s *store) {
+		s.fileSystem = fs
+	}
+}
+
+func openTestROStore(t *testing.T, tempDir string, options ...option) *ROStore {
 	t.Helper()
 
-	store, _ := OpenReadOnly(tempDir)
+	store, _ := OpenReadOnly(tempDir, withOsFileSystem, options[0])
 
 	t.Cleanup(func() {
 		store.Close()
@@ -23,7 +34,7 @@ func openTestROStore(t *testing.T, tempDir string) *ROStore {
 func openTestRWStore(t *testing.T, syncOnPut bool, tempDir string) *RWStore {
 	t.Helper()
 
-	store, _ := Open(tempDir, syncOnPut)
+	store, _ := Open(tempDir, syncOnPut, withOsFileSystem)
 
 	t.Cleanup(func() {
 		store.Close()
@@ -37,7 +48,7 @@ func setupRWTestStore(t *testing.T, syncOnPut bool) (*RWStore, string) {
 	t.Helper()
 
 	tempDir := t.TempDir()
-	store, _ := Open(tempDir, syncOnPut)
+	store, _ := Open(tempDir, syncOnPut, withOsFileSystem)
 
 	t.Cleanup(func() {
 		store.Close()

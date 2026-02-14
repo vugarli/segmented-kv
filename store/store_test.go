@@ -118,15 +118,9 @@ func TestOpen(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mockFS := &MockFileSystem{}
 
-			tempFs := fileSystem
-			fileSystem = mockFS
-			defer func() {
-				fileSystem = tempFs
-			}()
-
 			tt.setupMock(mockFS)
 
-			store, err := Open(tt.path, tt.syncOnPut)
+			store, err := Open(tt.path, tt.syncOnPut, withFileSystem(mockFS))
 
 			if tt.expectedError != nil {
 				if err == nil {
@@ -214,15 +208,9 @@ func TestOpenReadOnly(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mockFS := &MockFileSystem{}
 
-			tempFs := fileSystem
-			fileSystem = mockFS
-			defer func() {
-				fileSystem = tempFs
-			}()
-
 			tt.setupMock(mockFS)
 
-			store, err := OpenReadOnly(tt.path)
+			store, err := OpenReadOnly(tt.path, withFileSystem(mockFS))
 
 			if tt.expectedError != nil {
 				if err == nil {
@@ -403,7 +391,7 @@ func TestEntryParsing(t *testing.T) {
 
 func TestWriteEntry_EdgeCases(t *testing.T) {
 	t.Run("nil currentFile", func(t *testing.T) {
-		store := &RWStore{store: store{
+		store := &RWStore{store: &store{
 			currentFile: nil,
 			KeyDir:      make(map[string]EntryRecord),
 		}}
@@ -620,15 +608,8 @@ func TestIsTombStoneEntry(t *testing.T) {
 }
 
 func TestListKeys(t *testing.T) {
+	store := openTestROStore(t, ".", withMockFS)
 
-	mockFS := MockFileSystem{}
-	tempFs := fileSystem
-	fileSystem = mockFS
-	defer func() {
-		fileSystem = tempFs
-	}()
-
-	store := openTestROStore(t, ".")
 	entries := []struct {
 		key string
 	}{
