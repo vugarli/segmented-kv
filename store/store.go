@@ -103,6 +103,7 @@ type store struct {
 	readFileCache fileHandlerCache
 }
 
+// test coverage needed
 type fileHandlerCache struct {
 	mu    sync.Mutex
 	cache map[int]*os.File
@@ -200,6 +201,8 @@ func Open(directory string, syncOnPut bool, options ...option) (*RWStore, error)
 	s.currentFile = newFile
 
 	store := &RWStore{store: s}
+
+	// store.ScheduleMerge(SecondMergeScheduler(10))
 
 	return store, nil
 }
@@ -364,22 +367,41 @@ func (s *RWStore) Delete(key string) error {
 
 	return nil
 }
-func (s *RWStore) Merge() error {
-	var entries []MergeEntryRecord
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *store) entriesToMerge() map[int][]MergeEntryRecord {
+	var entries map[int][]MergeEntryRecord
 
 	for key, record := range maps.All(s.KeyDir) {
 		if record.FileId != s.currentFileId {
-			entries = append(entries, MergeEntryRecord{
+			entries[record.FileId] = append(entries[record.FileId], MergeEntryRecord{
 				Record: record,
 				Key:    key,
 			})
 		}
 	}
+	return entries
+}
 
-	groups := groupEntriesFFD(entries, MAXIMUM_MERGED_FILE_SIZE)
+func (s *RWStore) Merge(mergeEntryFilters ...MergeEntryRecordsFilter) error {
+	var entries map[int][]MergeEntryRecord
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// filter files based on custom criteria
+	entries = s.entriesToMerge()
+
+	for _, filter := range mergeEntryFilters {
+		filter(entries)
+	}
+	//TODO fix DS
+	entriesFlattened := make([]MergeEntryRecord, 0)
+	for entries := range maps.Values(entries) {
+		for _, entry := range entries {
+			entriesFlattened = append(entriesFlattened, entry)
+		}
+	}
+	groups := groupEntriesFFD(entriesFlattened, MAXIMUM_MERGED_FILE_SIZE)
 
 	//TODO need rollback here
 	results, err := s.saveGroups(groups)

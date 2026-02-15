@@ -520,3 +520,10 @@ func TestReadEntryFunc(t *testing.T) {
 		}
 	})
 }
+
+func TestRollbackMidMerge(t *testing.T) {
+	store, _ := setupRWTestStore(t, true)
+
+	ensureFileRotationHappens(t, store, false, "key")
+
+}
