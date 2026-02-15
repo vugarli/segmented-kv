@@ -15,6 +15,7 @@ type Mergable interface {
 
 type MergeScheduler func(Mergable, ...MergeEntryRecordsFilter)
 
+// During merge, lock is held on store.
 func (store *RWStore) ScheduleMerge(scheduler MergeScheduler, filters ...MergeEntryRecordsFilter) {
 	scheduler(store, filters...)
 }

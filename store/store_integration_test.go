@@ -521,9 +521,20 @@ func TestReadEntryFunc(t *testing.T) {
 	})
 }
 
-func TestRollbackMidMerge(t *testing.T) {
-	store, _ := setupRWTestStore(t, true)
-
-	ensureFileRotationHappens(t, store, false, "key")
+func TestMergeRollback(t *testing.T) {
 
 }
+
+// func TestMergeStrategy(t *testing.T) {
+// 	t.Run("Context cancellation cancels after context cancelation", func(t *testing.T) {
+// 		store, _ := setupRWTestStore(t, true)
+// 		ctx := context.Background()
+
+// 		store.ScheduleMerge(PeriodicMerge(ctx, 2*time.Second))
+
+// 		ctx.Done()
+
+// 		ensureFileRotationHappens(t, store, false, "key")
+// 	})
+
+// }

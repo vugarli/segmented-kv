@@ -88,6 +88,7 @@ var (
 	ErrStoreDirectoryNotFound         = errors.New("Specified store directory doesn't exist error")
 	ErrStoreDirectoryPermissionDenied = errors.New("Permission denied error")
 	ErrStoreLocked                    = errors.New("Store is locked")
+	ErrCorruptedState                 = errors.New("Store operation failed. Needs rollback")
 )
 
 type store struct {
@@ -368,11 +369,11 @@ func (s *RWStore) Delete(key string) error {
 	return nil
 }
 
-func (s *store) entriesToMerge() map[int][]MergeEntryRecord {
-	var entries map[int][]MergeEntryRecord
+func entriesToMerge(keyDir map[string]EntryRecord, currentFileId int) map[int][]MergeEntryRecord {
+	var entries map[int][]MergeEntryRecord = make(map[int][]MergeEntryRecord)
 
-	for key, record := range maps.All(s.KeyDir) {
-		if record.FileId != s.currentFileId {
+	for key, record := range maps.All(keyDir) {
+		if record.FileId != currentFileId {
 			entries[record.FileId] = append(entries[record.FileId], MergeEntryRecord{
 				Record: record,
 				Key:    key,
@@ -382,32 +383,40 @@ func (s *store) entriesToMerge() map[int][]MergeEntryRecord {
 	return entries
 }
 
-func (s *RWStore) Merge(mergeEntryFilters ...MergeEntryRecordsFilter) error {
-	var entries map[int][]MergeEntryRecord
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// filter files based on custom criteria
-	entries = s.entriesToMerge()
-
-	for _, filter := range mergeEntryFilters {
+func applyFilters(entries map[int][]MergeEntryRecord, filters ...MergeEntryRecordsFilter) map[int][]MergeEntryRecord {
+	for _, filter := range filters {
 		filter(entries)
 	}
-	//TODO fix DS
-	entriesFlattened := make([]MergeEntryRecord, 0)
-	for entries := range maps.Values(entries) {
-		for _, entry := range entries {
-			entriesFlattened = append(entriesFlattened, entry)
-		}
+	return entries
+}
+
+func getMergeCandidates(keyDir map[string]EntryRecord, currentFileId int, filters ...MergeEntryRecordsFilter) map[int][]MergeEntryRecord {
+	return applyFilters(entriesToMerge(keyDir, currentFileId), filters...)
+}
+
+func (s *RWStore) Merge(mergeEntryFilters ...MergeEntryRecordsFilter) error {
+	// Holding RLock as candidate retrieval may access KeyDir
+	s.mu.RLock()
+	candidateEntries := getMergeCandidates(s.KeyDir, s.currentFileId, mergeEntryFilters...)
+	s.mu.RUnlock()
+
+	if len(candidateEntries) == 0 {
+		return nil
 	}
-	groups := groupEntriesFFD(entriesFlattened, MAXIMUM_MERGED_FILE_SIZE)
+
+	// Grouping entries to files efficiently in FFD order
+	groups := groupEntriesFFD(candidateEntries, MAXIMUM_MERGED_FILE_SIZE)
+
+	// Holding WLock as next ops modify state
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	//TODO need rollback here
 	results, err := s.saveGroups(groups)
 	if err != nil {
 		return fmt.Errorf("Error during writing groups to files:%w", err)
 	}
+
 	s.updateKeydirFromMergeResults(results)
 
 	if err := s.cleanJunk(); err != nil {
@@ -415,6 +424,77 @@ func (s *RWStore) Merge(mergeEntryFilters ...MergeEntryRecordsFilter) error {
 	}
 	return nil
 }
+
+type binState struct {
+	groups  [][]MergeEntryRecord
+	current []MergeEntryRecord
+	size    int64
+}
+
+func foldEntry(state binState, entry MergeEntryRecord, maxSize int64) binState {
+	entrySize := entry.Record.EntrySize()
+
+	switch {
+	case entrySize >= maxSize:
+		// doesn't fit seal current bin if any, give entry its own bin
+		groups := state.groups
+		if len(state.current) > 0 {
+			groups = append(groups, state.current)
+		}
+		return binState{
+			groups:  append(groups, []MergeEntryRecord{entry}),
+			current: nil,
+			size:    0,
+		}
+
+	case state.size+entrySize <= maxSize:
+		// fits in current bin
+		return binState{
+			groups:  state.groups,
+			current: append(state.current, entry),
+			size:    state.size + entrySize,
+		}
+
+	default:
+		// doesn't fit seal current bin, start new one
+		return binState{
+			groups:  append(state.groups, state.current),
+			current: []MergeEntryRecord{entry},
+			size:    entrySize,
+		}
+	}
+}
+
+// Groups entries in FFD order so that no group exceeds maxSize
+func groupEntriesFFD(entries map[int][]MergeEntryRecord, maxSize int64) [][]MergeEntryRecord {
+	// flatten map values into a slice for sorting
+	flat := make([]MergeEntryRecord, 0, totalEntries(entries))
+	for _, recs := range entries {
+		flat = append(flat, recs...)
+	}
+
+	slices.SortFunc(flat, func(a, b MergeEntryRecord) int {
+		return cmp.Compare(b.Record.EntrySize(), a.Record.EntrySize())
+	})
+
+	final := fold(flat, binState{}, func(state binState, entry MergeEntryRecord) binState {
+		return foldEntry(state, entry, maxSize)
+	})
+
+	if len(final.current) > 0 {
+		return append(final.groups, final.current)
+	}
+	return final.groups
+}
+
+func totalEntries(entries map[int][]MergeEntryRecord) int {
+	return fold(
+		slices.Collect(maps.Values(entries)),
+		0,
+		func(acc int, recs []MergeEntryRecord) int { return acc + len(recs) },
+	)
+}
+
 func initEntry(key, value []byte, timeStamp uint64) []byte {
 	// CRC TSTAMP KSZ VSZ K V
 	totalSize := CRC_SIZE + TSTAMP_SIZE + KEY_SIZE_SIZE + VALUE_SIZE_SIZE + len(key) + len(value)
@@ -556,7 +636,7 @@ func extractFileId(a string) (int, error) {
 	return 0, fmt.Errorf("data file format is wrong")
 }
 
-// Given inactive files, and updates KeyDir
+// Given inactive files, and dir, updates KeyDir
 func generateKeyDirFromFileIds(directory string, inactiveDataFileIds []int) (map[string]EntryRecord, error) {
 	keyDir := make(map[string]EntryRecord)
 
@@ -577,7 +657,6 @@ func isTombStoneEntry(header []byte) (bool, error) {
 		return false, err
 	}
 	timeStamp := parsedHeader.Timestamp
-
 	return timeStamp>>63 == 1 && parsedHeader.ValueSize == 0, nil
 }
 
@@ -587,8 +666,6 @@ func loadKeyDirFromFile(filePath string, keyDir map[string]EntryRecord) error {
 	if err != nil {
 		return fmt.Errorf("extracting file ID from %s: %w", filename, err)
 	}
-
-	//cache
 
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -674,47 +751,13 @@ func (s *RWStore) updateKeydirFromMergeResults(results []MergeResult) {
 	}
 }
 
-// Groups entries in FFD order so that no group exceeds maxSize
-func groupEntriesFFD(entries []MergeEntryRecord, maxSize int64) [][]MergeEntryRecord {
-	sorted := make([]MergeEntryRecord, len(entries))
-	copy(sorted, entries)
-	slices.SortFunc(sorted, func(a, b MergeEntryRecord) int {
-		return cmp.Compare(b.Record.EntrySize(), a.Record.EntrySize())
-	})
-
-	var groups [][]MergeEntryRecord
-	var currentGroup []MergeEntryRecord
-	currentSize := int64(0)
-
-	for _, entry := range sorted {
-		entrySize := entry.Record.EntrySize()
-
-		if entrySize >= maxSize {
-			if len(currentGroup) > 0 {
-				groups = append(groups, currentGroup)
-				currentGroup = nil
-				currentSize = 0
-			}
-			groups = append(groups, []MergeEntryRecord{entry})
-			continue
+func (s *store) cleanCorruptedMergeFiles(corruptedResults []MergeResult) {
+	for _, result := range corruptedResults {
+		filePath := filepath.Join(s.DirectoryName, fmt.Sprintf("%d.data", result.FileId))
+		if err := s.fileSystem.Remove(filePath); err != nil {
+			//log
 		}
-
-		if currentSize+entrySize <= maxSize {
-			currentGroup = append(currentGroup, entry)
-			currentSize += entrySize
-			continue
-		}
-
-		groups = append(groups, currentGroup)
-		currentGroup = []MergeEntryRecord{entry}
-		currentSize = entrySize
 	}
-
-	if len(currentGroup) > 0 {
-		groups = append(groups, currentGroup)
-	}
-
-	return groups
 }
 
 // Writes groups to .data files. New fileIds gets incremented from currentFileId
@@ -727,9 +770,15 @@ func (s *RWStore) saveGroups(groups [][]MergeEntryRecord) ([]MergeResult, error)
 	nextFileId := s.currentFileId + 1
 	for _, group := range groups {
 		mergeResults, err := s.saveGroupToFile(group, nextFileId)
+		// Need to clean corrupted files
+		if err == ErrCorruptedState {
+			s.cleanCorruptedMergeFiles(mergeResults)
+		}
 		if err != nil {
 			return result, err
 		}
+		//TODO save group to hint
+
 		result = append(result, mergeResults...)
 		nextFileId++
 	}
@@ -737,7 +786,7 @@ func (s *RWStore) saveGroups(groups [][]MergeEntryRecord) ([]MergeResult, error)
 }
 func (s *RWStore) saveGroupToFile(group []MergeEntryRecord, fileId int) ([]MergeResult, error) {
 	destinationFileName := filepath.Join(s.DirectoryName, fmt.Sprintf("%d.data", fileId))
-	destinationFile, err := os.OpenFile(destinationFileName, os.O_CREATE|os.O_RDWR, 0644)
+	destinationFile, err := os.OpenFile(destinationFileName, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("opening destination file: %w", err)
 	}
@@ -748,23 +797,24 @@ func (s *RWStore) saveGroupToFile(group []MergeEntryRecord, fileId int) ([]Merge
 	for _, staleEntry := range group {
 		originFile, err := os.Open(filepath.Join(s.DirectoryName, fmt.Sprintf("%d.data", staleEntry.Record.FileId)))
 		if err != nil {
-			return nil, fmt.Errorf("opening origin file: %w", err)
+			return nil, fmt.Errorf("%w Opening origin file: %w", ErrCorruptedState, err)
 		}
 		entry, entryHeader, err := readEntry(originFile, uint64(staleEntry.Record.ValuePos-HEADER_SIZE-uint64(len(staleEntry.Key))))
 		originFile.Close()
 		if err != nil {
-			return nil, fmt.Errorf("reading entry: %w", err)
+			return result, fmt.Errorf("%w Reading entry: %w", ErrCorruptedState, err)
 		}
 		n, err := destinationFile.WriteAt(entry, int64(currentOffset))
 		if err != nil {
-			return nil, fmt.Errorf("writing entry: %w", err)
+			return result, fmt.Errorf("%w Writing entry: %w", ErrCorruptedState, err)
 		}
 		if n != len(entry) {
-			return nil, fmt.Errorf("incomplete write: wrote %d of %d bytes", n, len(entry))
+			return result, fmt.Errorf("%w Incomplete write: wrote %d of %d bytes", ErrCorruptedState, n, len(entry))
 		}
+		newValuePos := currentOffset + HEADER_SIZE + uint64(entryHeader.KeySize)
 		result = append(result, MergeResult{
 			Key:      staleEntry.Key,
-			ValuePos: uint64(entryHeader.ValueOffset),
+			ValuePos: newValuePos,
 			FileId:   fileId,
 		})
 		currentOffset += uint64(len(entry))

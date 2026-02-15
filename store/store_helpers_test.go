@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -146,20 +147,6 @@ func ensureFileRotationHappens(t *testing.T, store *RWStore, isTemp bool, keySuf
 	return uint32(numberOfEntriesNeeded), sizeOfEntryValue
 }
 
-func createMockEntriesGivenValueSizes(t *testing.T, valueSizes []int, keySize int) []MergeEntryRecord {
-	t.Helper()
-	var records = make([]MergeEntryRecord, 0, len(valueSizes))
-
-	for _, valueSize := range valueSizes {
-		records = append(records, MergeEntryRecord{
-			Record: EntryRecord{
-				KeySize:   uint32(keySize),
-				ValueSize: uint32(valueSize)},
-			Key: "1key"})
-	}
-	return records
-}
-
 func assertEntryExistsKeyValue(t *testing.T, store *store, key, value string) {
 	t.Helper()
 	v, err := store.Get(key)
@@ -177,4 +164,31 @@ func assertKeyNotInKeyDir(t *testing.T, store *store, key string) {
 	if exists {
 		t.Fatalf("unexpected key: %s found in KeyDir", key)
 	}
+}
+
+func mockEntriesByFile(valueSizes []int, keySize int) map[int][]MergeEntryRecord {
+	entries := make(map[int][]MergeEntryRecord)
+	for i, vs := range valueSizes {
+		fileId := i % 3 // spread across 3 files arbitrarily
+		entries[fileId] = append(entries[fileId], mockEntry(keySize, vs))
+	}
+	return entries
+}
+
+// mockEntry builds a single MergeEntryRecord with given key and value sizes.
+func mockEntry(keySize, valueSize int) MergeEntryRecord {
+	return MergeEntryRecord{
+		Key: strings.Repeat("k", keySize),
+		Record: EntryRecord{
+			KeySize:   uint32(keySize),
+			ValueSize: uint32(valueSize),
+		},
+	}
+}
+
+// groupSize sums the encoded size of all entries in a group.
+func groupSize(group []MergeEntryRecord) int {
+	return fold(group, 0, func(acc int, e MergeEntryRecord) int {
+		return acc + int(e.Record.KeySize) + int(e.Record.ValueSize) + HEADER_SIZE
+	})
 }

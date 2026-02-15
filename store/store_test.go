@@ -633,7 +633,6 @@ func TestListKeys(t *testing.T) {
 }
 
 func TestGroupEntriesFFD(t *testing.T) {
-
 	tests := []struct {
 		name          string
 		valueSizes    []int
@@ -647,17 +646,15 @@ func TestGroupEntriesFFD(t *testing.T) {
 			expectedSizes: []int{400, 350},
 		},
 		{
-			name:       "gap filling (FFD logic)",
-			valueSizes: []int{300, 150, 70},
-			maxSize:    400,
-			// Sorted total sizes: 324, 174, 94
+			name:          "gap filling (FFD logic)",
+			valueSizes:    []int{300, 150, 70},
+			maxSize:       400,
 			expectedSizes: []int{324, 268},
 		},
 		{
-			name:       "perfect multiples of maxSize",
-			valueSizes: []int{176, 176, 176, 176},
-			maxSize:    400,
-			// each is 200.
+			name:          "perfect multiples of maxSize",
+			valueSizes:    []int{176, 176, 176, 176},
+			maxSize:       400,
 			expectedSizes: []int{400, 400},
 		},
 		{
@@ -682,8 +679,7 @@ func TestGroupEntriesFFD(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			entries := createMockEntriesGivenValueSizes(t, tt.valueSizes, 4)
-
+			entries := mockEntriesByFile(tt.valueSizes, 4)
 			groups := groupEntriesFFD(entries, int64(tt.maxSize))
 
 			if len(groups) != len(tt.expectedSizes) {
@@ -692,15 +688,83 @@ func TestGroupEntriesFFD(t *testing.T) {
 			}
 
 			for i, group := range groups {
-				var actualGroupSize int
-				for _, entry := range group {
-					actualGroupSize += int(entry.Record.ValueSize) + int(entry.Record.KeySize) + HEADER_SIZE
-				}
-
-				if tt.expectedSizes[i] != actualGroupSize {
-					t.Errorf("group %d: expected total size %d, got %d", i, tt.expectedSizes[i], actualGroupSize)
+				got := groupSize(group)
+				if tt.expectedSizes[i] != got {
+					t.Errorf("group %d: expected size %d, got %d", i, tt.expectedSizes[i], got)
 				}
 			}
 		})
 	}
+}
+
+func TestFoldEntry(t *testing.T) {
+	t.Run("fits in current bin", func(t *testing.T) {
+		entry := mockEntry(4, 100)
+		initial := binState{size: 50}
+
+		result := foldEntry(initial, entry, 400)
+
+		if len(result.current) != 1 {
+			t.Errorf("expected 1 entry in current bin, got %d", len(result.current))
+		}
+		if result.size != 50+entry.Record.EntrySize() {
+			t.Errorf("expected size %d, got %d", 50+entry.Record.EntrySize(), result.size)
+		}
+		if len(result.groups) != 0 {
+			t.Error("expected no sealed groups")
+		}
+	})
+
+	t.Run("does not fit — seals current bin and starts new", func(t *testing.T) {
+		existing := mockEntry(4, 100)
+		incoming := mockEntry(4, 100)
+		initial := binState{
+			current: []MergeEntryRecord{existing},
+			size:    380,
+		}
+
+		result := foldEntry(initial, incoming, 400)
+
+		if len(result.groups) != 1 {
+			t.Errorf("expected 1 sealed group, got %d", len(result.groups))
+		}
+		if len(result.current) != 1 {
+			t.Errorf("expected incoming entry in new bin, got %d entries", len(result.current))
+		}
+		if result.size != incoming.Record.EntrySize() {
+			t.Errorf("expected new bin size %d, got %d", incoming.Record.EntrySize(), result.size)
+		}
+	})
+
+	t.Run("oversized — gets its own bin, current bin sealed", func(t *testing.T) {
+		existing := mockEntry(4, 50)
+		oversized := mockEntry(4, 500)
+		initial := binState{
+			current: []MergeEntryRecord{existing},
+			size:    int64(existing.Record.EntrySize()),
+		}
+
+		result := foldEntry(initial, oversized, 400)
+
+		if len(result.groups) != 2 {
+			t.Errorf("expected 2 groups (sealed + oversized), got %d", len(result.groups))
+		}
+		if len(result.current) != 0 {
+			t.Error("expected empty current bin after oversized entry")
+		}
+		if result.size != 0 {
+			t.Errorf("expected size 0 after oversized entry, got %d", result.size)
+		}
+	})
+
+	t.Run("oversized with empty current bin — no phantom group created", func(t *testing.T) {
+		oversized := mockEntry(4, 500)
+		initial := binState{}
+
+		result := foldEntry(initial, oversized, 400)
+
+		if len(result.groups) != 1 {
+			t.Errorf("expected 1 group, got %d", len(result.groups))
+		}
+	})
 }
