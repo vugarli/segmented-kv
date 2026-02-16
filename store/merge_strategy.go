@@ -10,25 +10,27 @@ import (
 )
 
 type Mergable interface {
-	Merge(...MergeEntryRecordsFilter) error
+	Merge(MergeCandidateRetrievalStrat) error
 }
 
-type MergeScheduler func(Mergable, ...MergeEntryRecordsFilter)
+type MergeScheduler func(Mergable, MergeCandidateRetrievalStrat)
 
 // During merge, lock is held on store.
-func (store *RWStore) ScheduleMerge(scheduler MergeScheduler, filters ...MergeEntryRecordsFilter) {
-	scheduler(store, filters...)
+func (store *RWStore) ScheduleMerge(strat MergeCandidateRetrievalStrat, scheduler MergeScheduler) {
+	scheduler(store, strat)
 }
 
+// store.ScheduleMerge(Strat(filters),PeriodicMerge(ctx,dur))
+
 func PeriodicMerge(ctx context.Context, duration time.Duration) MergeScheduler {
-	return func(store Mergable, filters ...MergeEntryRecordsFilter) {
+	return func(store Mergable, strat MergeCandidateRetrievalStrat) {
 		go func() {
 			ticker := time.NewTicker(duration)
 			defer ticker.Stop()
 			for {
 				select {
 				case <-ticker.C:
-					store.Merge(filters...)
+					store.Merge(strat)
 				case <-ctx.Done():
 					return
 				}
@@ -64,5 +66,36 @@ func LiveRatioFilter(minLiveDataRatio float64, directory string) MergeEntryRecor
 			}
 
 		}
+	}
+}
+
+func FilterCurrentFileOut(currentFileId int) MergeEntryRecordsFilter {
+	return func(entries map[int][]MergeEntryRecord) {
+		delete(entries, currentFileId)
+	}
+}
+
+type MergeCandidateRetrievalStrat func(KeyDir) map[int][]MergeEntryRecord
+
+func applyFilters(entries map[int][]MergeEntryRecord, filters ...MergeEntryRecordsFilter) map[int][]MergeEntryRecord {
+	for _, filter := range filters {
+		filter(entries)
+	}
+	return entries
+}
+
+func groupEntriesByFileId(keyDir KeyDir) map[int][]MergeEntryRecord {
+	var entries map[int][]MergeEntryRecord = make(map[int][]MergeEntryRecord)
+	for key, record := range maps.All(keyDir) {
+		entries[record.FileId] = append(entries[record.FileId], MergeEntryRecord{
+			Record: record,
+			Key:    key,
+		})
+	}
+	return entries
+}
+func FilteredMergeEntryRetrievalStrat(filters ...MergeEntryRecordsFilter) MergeCandidateRetrievalStrat {
+	return func(kd KeyDir) map[int][]MergeEntryRecord {
+		return applyFilters(groupEntriesByFileId(kd), filters...)
 	}
 }

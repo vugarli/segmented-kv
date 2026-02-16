@@ -9,6 +9,12 @@ import (
 	"testing"
 )
 
+func withOsFileSystem(store *store) {
+	if store != nil {
+		store.fileSystem = OSFileSystem{}
+	}
+}
+
 func withMockFS(s *store) {
 	if s != nil {
 		s.fileSystem = MockFileSystem{}
@@ -110,13 +116,13 @@ func writeTestEntryWithTimeStamp(t *testing.T, store *RWStore, key string, value
 	if err != nil {
 		t.Fatalf("writeEntry failed: %v", err)
 	}
-	store.KeyDir[key] = *record
+	store.entryIndex[key] = *record
 }
 
 func assertKeyInKeyDir(t *testing.T, store *store, key string) EntryRecord {
 	t.Helper()
 
-	record, exists := store.KeyDir[key]
+	record, exists := store.entryIndex[key]
 	if !exists {
 		t.Fatalf("key %s not found in KeyDir", key)
 	}
@@ -160,7 +166,7 @@ func assertEntryExistsKeyValue(t *testing.T, store *store, key, value string) {
 
 func assertKeyNotInKeyDir(t *testing.T, store *store, key string) {
 	t.Helper()
-	_, exists := store.KeyDir[key]
+	_, exists := store.entryIndex[key]
 	if exists {
 		t.Fatalf("unexpected key: %s found in KeyDir", key)
 	}

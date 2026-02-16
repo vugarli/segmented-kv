@@ -142,7 +142,7 @@ func TestOpen(t *testing.T) {
 				if store.DirectoryName != tt.path {
 					t.Errorf("Expected directory %s, got %s", tt.path, store.DirectoryName)
 				}
-				if store.KeyDir == nil {
+				if store.entryIndex == nil {
 					t.Errorf("Expected initialized KeyDir, got nil")
 				}
 				if store.syncOnPut != tt.syncOnPut {
@@ -232,7 +232,7 @@ func TestOpenReadOnly(t *testing.T) {
 				if store.DirectoryName != tt.path {
 					t.Errorf("Expected directory %s, got %s", tt.path, store.DirectoryName)
 				}
-				if store.KeyDir == nil {
+				if store.entryIndex == nil {
 					t.Errorf("Expected initialized KeyDir, got nil")
 				}
 			}
@@ -393,7 +393,7 @@ func TestWriteEntry_EdgeCases(t *testing.T) {
 	t.Run("nil currentFile", func(t *testing.T) {
 		store := &RWStore{store: &store{
 			currentFile: nil,
-			KeyDir:      make(map[string]EntryRecord),
+			entryIndex:  make(map[string]EntryRecord),
 		}}
 
 		err := store.Put("key", []byte("value"))
@@ -620,7 +620,7 @@ func TestListKeys(t *testing.T) {
 		{key: "key"},
 	}
 	for _, e := range entries {
-		store.KeyDir[e.key] = EntryRecord{}
+		store.entryIndex[e.key] = EntryRecord{}
 	}
 	expected := []string{"key", "XX", "XXX"}
 	got := store.ListKeys()

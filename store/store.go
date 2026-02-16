@@ -91,9 +91,11 @@ var (
 	ErrCorruptedState                 = errors.New("Store operation failed. Needs rollback")
 )
 
+type KeyDir map[string]EntryRecord
+
 type store struct {
 	DirectoryName string
-	KeyDir        map[string]EntryRecord
+	entryIndex    KeyDir
 	lockFile      *os.File
 	currentFileId int
 	mu            sync.RWMutex
@@ -104,56 +106,10 @@ type store struct {
 	readFileCache fileHandlerCache
 }
 
-// test coverage needed
-type fileHandlerCache struct {
-	mu    sync.Mutex
-	cache map[int]*os.File
-}
-
-func (fh *fileHandlerCache) get(directory string, id int) (*os.File, error) {
-	fh.mu.Lock()
-	defer fh.mu.Unlock()
-
-	if file, exists := fh.cache[id]; exists {
-		return file, nil
-	}
-
-	file, err := os.Open(filepath.Join(directory, fmt.Sprintf("%d.data", id)))
-	if err != nil {
-		return nil, err
-	}
-	fh.cache[id] = file
-	return file, nil
-}
-
-func (fh *fileHandlerCache) evict(id int) {
-	fh.mu.Lock()
-	defer fh.mu.Unlock()
-	if f, exist := fh.cache[id]; exist {
-		f.Close()
-		delete(fh.cache, id)
-	}
-}
-
-func (fh *fileHandlerCache) evictall() {
-	fh.mu.Lock()
-	defer fh.mu.Unlock()
-	for id, f := range maps.All(fh.cache) {
-		f.Close()
-		delete(fh.cache, id)
-	}
-}
-
 type ROStore struct{ *store }
 type RWStore struct{ *store }
 
 type option func(*store)
-
-func withOsFileSystem(store *store) {
-	if store != nil {
-		store.fileSystem = OSFileSystem{}
-	}
-}
 
 func Open(directory string, syncOnPut bool, options ...option) (*RWStore, error) {
 	s := &store{
@@ -190,7 +146,7 @@ func Open(directory string, syncOnPut bool, options ...option) (*RWStore, error)
 	if err != nil {
 		return nil, fmt.Errorf("Error while getting keyDir in dir:%s :%w", directory, err)
 	}
-	s.KeyDir = keyDir
+	s.entryIndex = keyDir
 
 	newFileId := getNewFileId(dataFileIds)
 	s.currentFileId = newFileId
@@ -203,7 +159,7 @@ func Open(directory string, syncOnPut bool, options ...option) (*RWStore, error)
 
 	store := &RWStore{store: s}
 
-	// store.ScheduleMerge(SecondMergeScheduler(10))
+	//store.ScheduleMerge(PeriodicMerge(10 * time.Second))
 
 	return store, nil
 }
@@ -243,7 +199,7 @@ func OpenReadOnly(directory string, options ...option) (*ROStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Error while getting keyDir in dir:%s :%w", directory, err)
 	}
-	s.KeyDir = keyDir
+	s.entryIndex = keyDir
 
 	newFileId := getNewFileId(dataFileIds)
 	s.currentFileId = newFileId
@@ -280,7 +236,7 @@ func (s *RWStore) Put(key string, value []byte) error {
 	if err != nil {
 		return err
 	}
-	s.KeyDir[string(keyByte)] = *record
+	s.entryIndex[string(keyByte)] = *record
 	s.currentSize += uint32(len(entry))
 	if s.currentSize >= MAXIMUM_FILE_SIZE {
 		if err := s.rotateFile(); err != nil {
@@ -296,7 +252,7 @@ func (s *store) Get(key string) ([]byte, error) {
 	}
 
 	s.mu.RLock()
-	entryRecord, exists := s.KeyDir[key]
+	entryRecord, exists := s.entryIndex[key]
 	directoryName := s.DirectoryName
 	s.mu.RUnlock()
 
@@ -308,12 +264,6 @@ func (s *store) Get(key string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening data file: %w", err)
 	}
-	// fileName := filepath.Join(directoryName, fmt.Sprintf("%d.data", entryRecord.FileId))
-	// readFile, err := os.Open(fileName)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("opening data file: %w", err)
-	// }
-	// defer readFile.Close()
 
 	var buf = make([]byte, entryRecord.ValueSize)
 
@@ -332,7 +282,7 @@ func (s *store) Get(key string) ([]byte, error) {
 func (s *store) ListKeys() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return slices.Collect(maps.Keys(s.KeyDir))
+	return slices.Collect(maps.Keys(s.entryIndex))
 }
 func (s *RWStore) Sync() error {
 	s.mu.Lock()
@@ -353,7 +303,7 @@ func (s *RWStore) Delete(key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, exists := s.KeyDir[key]
+	_, exists := s.entryIndex[key]
 	if !exists {
 		return ErrKeyNotFound
 	}
@@ -364,40 +314,15 @@ func (s *RWStore) Delete(key string) error {
 	if _, err := s.writeEntry(tombStoneEntry, key, timeStamp); err != nil {
 		return err
 	}
-	delete(s.KeyDir, key)
+	delete(s.entryIndex, key)
 
 	return nil
 }
 
-func entriesToMerge(keyDir map[string]EntryRecord, currentFileId int) map[int][]MergeEntryRecord {
-	var entries map[int][]MergeEntryRecord = make(map[int][]MergeEntryRecord)
-
-	for key, record := range maps.All(keyDir) {
-		if record.FileId != currentFileId {
-			entries[record.FileId] = append(entries[record.FileId], MergeEntryRecord{
-				Record: record,
-				Key:    key,
-			})
-		}
-	}
-	return entries
-}
-
-func applyFilters(entries map[int][]MergeEntryRecord, filters ...MergeEntryRecordsFilter) map[int][]MergeEntryRecord {
-	for _, filter := range filters {
-		filter(entries)
-	}
-	return entries
-}
-
-func getMergeCandidates(keyDir map[string]EntryRecord, currentFileId int, filters ...MergeEntryRecordsFilter) map[int][]MergeEntryRecord {
-	return applyFilters(entriesToMerge(keyDir, currentFileId), filters...)
-}
-
-func (s *RWStore) Merge(mergeEntryFilters ...MergeEntryRecordsFilter) error {
+func (s *RWStore) Merge(retStrat MergeCandidateRetrievalStrat) error {
 	// Holding RLock as candidate retrieval may access KeyDir
 	s.mu.RLock()
-	candidateEntries := getMergeCandidates(s.KeyDir, s.currentFileId, mergeEntryFilters...)
+	candidateEntries := retStrat(s.entryIndex)
 	s.mu.RUnlock()
 
 	if len(candidateEntries) == 0 {
@@ -637,8 +562,8 @@ func extractFileId(a string) (int, error) {
 }
 
 // Given inactive files, and dir, updates KeyDir
-func generateKeyDirFromFileIds(directory string, inactiveDataFileIds []int) (map[string]EntryRecord, error) {
-	keyDir := make(map[string]EntryRecord)
+func generateKeyDirFromFileIds(directory string, inactiveDataFileIds []int) (KeyDir, error) {
+	keyDir := make(KeyDir)
 
 	for _, dataFileId := range inactiveDataFileIds {
 		dataFileName := fmt.Sprintf("%d.data", dataFileId)
@@ -660,7 +585,7 @@ func isTombStoneEntry(header []byte) (bool, error) {
 	return timeStamp>>63 == 1 && parsedHeader.ValueSize == 0, nil
 }
 
-func loadKeyDirFromFile(filePath string, keyDir map[string]EntryRecord) error {
+func loadKeyDirFromFile(filePath string, keyDir KeyDir) error {
 	filename := filepath.Base(filePath)
 	fileId, err := extractFileId(filename)
 	if err != nil {
@@ -726,7 +651,7 @@ func (s *store) cleanJunk() error {
 
 	inUseDataIds := make(map[int]struct{})
 	inUseDataIds[s.currentFileId] = struct{}{}
-	for entry := range maps.Values(s.KeyDir) {
+	for entry := range maps.Values(s.entryIndex) {
 		inUseDataIds[entry.FileId] = struct{}{}
 	}
 
@@ -742,11 +667,11 @@ func (s *store) cleanJunk() error {
 }
 func (s *RWStore) updateKeydirFromMergeResults(results []MergeResult) {
 	for _, result := range results {
-		entry, e := s.KeyDir[result.Key]
+		entry, e := s.entryIndex[result.Key]
 		if e {
 			entry.FileId = result.FileId
 			entry.ValuePos = result.ValuePos
-			s.KeyDir[result.Key] = entry
+			s.entryIndex[result.Key] = entry
 		}
 	}
 }
@@ -760,6 +685,10 @@ func (s *store) cleanCorruptedMergeFiles(corruptedResults []MergeResult) {
 	}
 }
 
+// func (s *RWStore) nextIncrementalId() int {
+// 	return s.nextId + 1
+// }
+
 // Writes groups to .data files. New fileIds gets incremented from currentFileId
 func (s *RWStore) saveGroups(groups [][]MergeEntryRecord) ([]MergeResult, error) {
 	var length int
@@ -769,7 +698,7 @@ func (s *RWStore) saveGroups(groups [][]MergeEntryRecord) ([]MergeResult, error)
 	result := make([]MergeResult, 0, length)
 	nextFileId := s.currentFileId + 1
 	for _, group := range groups {
-		mergeResults, err := s.saveGroupToFile(group, nextFileId)
+		mergeResults, err := saveGroupToFile(group, nextFileId, s.DirectoryName)
 		// Need to clean corrupted files
 		if err == ErrCorruptedState {
 			s.cleanCorruptedMergeFiles(mergeResults)
@@ -784,8 +713,8 @@ func (s *RWStore) saveGroups(groups [][]MergeEntryRecord) ([]MergeResult, error)
 	}
 	return result, nil
 }
-func (s *RWStore) saveGroupToFile(group []MergeEntryRecord, fileId int) ([]MergeResult, error) {
-	destinationFileName := filepath.Join(s.DirectoryName, fmt.Sprintf("%d.data", fileId))
+func saveGroupToFile(group []MergeEntryRecord, fileId int, directory string) ([]MergeResult, error) {
+	destinationFileName := filepath.Join(directory, fmt.Sprintf("%d.data", fileId))
 	destinationFile, err := os.OpenFile(destinationFileName, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("opening destination file: %w", err)
@@ -795,7 +724,7 @@ func (s *RWStore) saveGroupToFile(group []MergeEntryRecord, fileId int) ([]Merge
 	result := make([]MergeResult, 0, len(group))
 	var currentOffset uint64
 	for _, staleEntry := range group {
-		originFile, err := os.Open(filepath.Join(s.DirectoryName, fmt.Sprintf("%d.data", staleEntry.Record.FileId)))
+		originFile, err := os.Open(filepath.Join(directory, fmt.Sprintf("%d.data", staleEntry.Record.FileId)))
 		if err != nil {
 			return nil, fmt.Errorf("%w Opening origin file: %w", ErrCorruptedState, err)
 		}

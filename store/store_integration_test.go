@@ -90,11 +90,11 @@ func TestPut(t *testing.T) {
 
 		store.Put(key, []byte("value1"))
 
-		record1 := store.KeyDir[key]
+		record1 := store.entryIndex[key]
 
 		store.Put(key, []byte("value2"))
 
-		record2 := store.KeyDir[key]
+		record2 := store.entryIndex[key]
 
 		if record1.ValuePos == record2.ValuePos {
 			t.Error("expected different positions for overwrites")
@@ -123,8 +123,8 @@ func TestPut(t *testing.T) {
 
 		wg.Wait()
 
-		if len(store.KeyDir) != numWrites {
-			t.Errorf("expected %d keys, got %d", numWrites, len(store.KeyDir))
+		if len(store.entryIndex) != numWrites {
+			t.Errorf("expected %d keys, got %d", numWrites, len(store.entryIndex))
 		}
 	})
 
@@ -201,7 +201,7 @@ func TestWriteEntry_ValuePosition(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			record := store.KeyDir[tt.key]
+			record := store.entryIndex[tt.key]
 
 			expectedValuePos := positionBefore + int64(HEADER_SIZE) + int64(len(tt.key))
 
@@ -369,7 +369,7 @@ func TestMerge(t *testing.T) {
 
 		_, size := ensureFileRotationHappens(t, store, true, "key3")
 
-		if err := store.Merge(); err != nil {
+		if err := store.Merge(FilteredMergeEntryRetrievalStrat(FilterCurrentFileOut(store.currentFileId))); err != nil {
 			t.Error("Failed to Merge")
 		}
 		store.Close()
@@ -422,7 +422,7 @@ func TestMerge(t *testing.T) {
 		// inactive: 0.data. 5 entries + N key3 entries
 		// inactive: 1.data. 2 key4 entries
 
-		if err := store.Merge(); err != nil {
+		if err := store.Merge(FilteredMergeEntryRetrievalStrat(FilterCurrentFileOut(store.currentFileId))); err != nil {
 			t.Error("Failed to Merge %w", err)
 		}
 		// remaining files: 2.data, 1.data

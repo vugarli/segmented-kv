@@ -10,8 +10,12 @@ type Fake struct {
 	calledOn time.Time
 }
 
-func (f *Fake) Merge(mergeEntryFilters ...MergeEntryRecordsFilter) error {
+func (f *Fake) Merge(strat MergeCandidateRetrievalStrat) error {
 	f.calledOn = time.Now()
+	return nil
+}
+
+func fakeStrat(kd KeyDir) map[int][]MergeEntryRecord {
 	return nil
 }
 
@@ -24,7 +28,7 @@ func TestPeriodicMergeSchedule(t *testing.T) {
 	duration := 2 * time.Second
 
 	c := PeriodicMerge(ctx, duration)
-	c(&fake)
+	c(&fake, fakeStrat)
 
 	time.Sleep(2500 * time.Millisecond)
 
