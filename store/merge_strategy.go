@@ -94,6 +94,7 @@ func groupEntriesByFileId(keyDir KeyDir) map[int][]MergeEntryRecord {
 	}
 	return entries
 }
+
 func FilteredMergeEntryRetrievalStrat(filters ...MergeEntryRecordsFilter) MergeCandidateRetrievalStrat {
 	return func(kd KeyDir) map[int][]MergeEntryRecord {
 		return applyFilters(groupEntriesByFileId(kd), filters...)

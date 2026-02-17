@@ -25,6 +25,7 @@ const (
 	VALUE_SIZE_SIZE = 4
 	CRC_SIZE        = 4
 	TSTAMP_SIZE     = 8
+	VALUE_POS_SIZE  = 8
 	HEADER_SIZE     = 20
 
 	CRC_OFFSET        = 0
@@ -68,9 +69,10 @@ type MergeEntryRecord struct {
 	Key    string
 }
 type MergeResult struct {
-	Key      string
-	ValuePos uint64
-	FileId   int
+	StaleEntry EntryRecord
+	Key        string
+	ValuePos   uint64
+	FileId     int
 }
 
 // Its assumed that single entry will never be bigger than 4GB
@@ -350,7 +352,8 @@ func (s *RWStore) Merge(retStrat MergeCandidateRetrievalStrat) error {
 
 	// id sequence starts after currentFileId
 	results, err := s.saveGroups(groups, SaveToDisk(s.DirectoryName, s.nextId),
-		CleanCorruptedFromDisk(s.DirectoryName, s.fileSystem), CommitToDisk(s.DirectoryName, s.fileSystem))
+		CleanCorruptedFromDisk(s.DirectoryName, s.fileSystem),
+		GenerateHintDecorator(s.fileSystem, s.DirectoryName, writeHintEntriesToDisk, CommitToDisk(s.DirectoryName, s.fileSystem)))
 	if err != nil {
 		return fmt.Errorf("Error during writing groups to files:%w", err)
 	}
@@ -580,13 +583,54 @@ func generateKeyDirFromFileIds(directory string, inactiveDataFileIds []int) (Key
 
 	for _, dataFileId := range inactiveDataFileIds {
 		dataFileName := fmt.Sprintf("%d.data", dataFileId)
-		filepath := filepath.Join(directory, dataFileName)
+		dataFilepath := filepath.Join(directory, dataFileName)
 
-		if err := loadKeyDirFromFile(filepath, keyDir); err != nil {
-			return nil, fmt.Errorf("Warning: error loading %s: %v", dataFileName, err)
+		hintFileName := fmt.Sprintf("%d.hint", dataFileId)
+		hintFilepath := filepath.Join(directory, hintFileName)
+
+		if _, err := os.Stat(hintFilepath); err == nil {
+			loadKeyDirFromHintFile(hintFilepath, keyDir, dataFileId)
+			// log
+		} else {
+			if err := loadKeyDirFromDataFile(dataFilepath, keyDir); err != nil {
+				return nil, fmt.Errorf("Warning: error loading %s: %v", dataFileName, err)
+			}
 		}
 	}
 	return keyDir, nil
+}
+
+func loadKeyDirFromHintFile(filePath string, index KeyDir, fileId int) error {
+	hintFile, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("Error opening hint file to load keydir: %w", err)
+	}
+	defer hintFile.Close()
+
+	offset := int64(0)
+
+	for {
+		hintEntryHeader, key, err := readHintEntry(hintFile, offset)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		existing, exists := index[key]
+		if !exists || (exists && hintEntryHeader.Timestamp > existing.Timestamp) {
+			index[key] = EntryRecord{
+				FileId:    fileId,
+				ValueSize: hintEntryHeader.ValueSize,
+				ValuePos:  hintEntryHeader.ValuePos,
+				Timestamp: hintEntryHeader.Timestamp,
+				KeySize:   uint32(len(key)),
+			}
+		}
+		offset += int64(len(key) + HINT_HEADER_SIZE)
+	}
+	return nil
 }
 
 func isTombStoneEntry(header []byte) (bool, error) {
@@ -598,7 +642,7 @@ func isTombStoneEntry(header []byte) (bool, error) {
 	return timeStamp>>63 == 1 && parsedHeader.ValueSize == 0, nil
 }
 
-func loadKeyDirFromFile(filePath string, keyDir KeyDir) error {
+func loadKeyDirFromDataFile(filePath string, keyDir KeyDir) error {
 	filename := filepath.Base(filePath)
 	fileId, err := extractFileId(filename)
 	if err != nil {
@@ -702,7 +746,7 @@ func idSequence(startId int) iter.Seq[int] {
 
 // Persists, and handles corrupted groups according to strats
 func (s *RWStore) saveGroups(groups [][]MergeEntryRecord,
-	savingStrat GroupSavingStrat, onCorruption GroupCorruptionStrat, onSuccess GroupCommitStrat) ([]MergeResult, error) {
+	savingStrat GroupSavingStrat, onCorruption GroupCorruptionStrat, onSuccess GroupOnSuccessStrat) ([]MergeResult, error) {
 	var length int
 	for _, v := range groups {
 		length += len(v)
