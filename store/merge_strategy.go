@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"os"
 	"path/filepath"
 	"time"
 )
@@ -43,13 +42,13 @@ type MergeEntryRecordsFilter func(map[int][]MergeEntryRecord)
 
 // Filters out entries which belong to a file which has less than minLiveDataRatio
 // Ex: minLiveDataRation: 0.4 means files with 40% or more live data are exempt from merging.
-func LiveRatioFilter(minLiveDataRatio float64, directory string) MergeEntryRecordsFilter {
+func LiveRatioFilter(minLiveDataRatio float64, directory string, fileSystem FileSystem) MergeEntryRecordsFilter {
 	return func(mer map[int][]MergeEntryRecord) {
 
 		group := make(map[int]float64) //fileId;ratio
 
 		for fileId, entries := range maps.All(mer) {
-			fs, err := os.Stat(filepath.Join(directory, fmt.Sprintf("%d.data", fileId)))
+			fs, err := fileSystem.Stat(filepath.Join(directory, fmt.Sprintf("%d.data", fileId)))
 			if err != nil {
 				continue //log
 			}

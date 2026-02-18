@@ -146,7 +146,7 @@ func Open(directory string, syncOnPut bool, options ...option) (*RWStore, error)
 		return nil, fmt.Errorf("Error while getting dataFileIds in dir:%s :%w", directory, err)
 	}
 
-	keyDir, err := generateKeyDirFromFileIds(directory, dataFileIds)
+	keyDir, err := generateKeyDirFromFileIds(directory, dataFileIds, s.fileSystem)
 	if err != nil {
 		return nil, fmt.Errorf("Error while getting keyDir in dir:%s :%w", directory, err)
 	}
@@ -210,7 +210,7 @@ func OpenReadOnly(directory string, options ...option) (*ROStore, error) {
 		return nil, fmt.Errorf("Error while getting dataFileIds in dir:%s :%w", directory, err)
 	}
 
-	keyDir, err := generateKeyDirFromFileIds(directory, dataFileIds)
+	keyDir, err := generateKeyDirFromFileIds(directory, dataFileIds, s.fileSystem)
 	if err != nil {
 		return nil, fmt.Errorf("Error while getting keyDir in dir:%s :%w", directory, err)
 	}
@@ -351,7 +351,7 @@ func (s *RWStore) Merge(retStrat MergeCandidateRetrievalStrat) error {
 	defer s.mu.Unlock()
 
 	// id sequence starts after currentFileId
-	results, err := s.saveGroups(groups, SaveToDisk(s.DirectoryName, s.nextId),
+	results, err := s.saveGroups(groups, SaveToDisk(s.DirectoryName, s.nextId, s.fileSystem),
 		CleanCorruptedFromDisk(s.DirectoryName, s.fileSystem),
 		GenerateHintDecorator(s.fileSystem, s.DirectoryName, writeHintEntriesToDisk, CommitToDisk(s.DirectoryName, s.fileSystem)))
 	if err != nil {
@@ -578,7 +578,7 @@ func extractFileId(a string) (int, error) {
 }
 
 // Given inactive files, and dir, updates KeyDir
-func generateKeyDirFromFileIds(directory string, inactiveDataFileIds []int) (KeyDir, error) {
+func generateKeyDirFromFileIds(directory string, inactiveDataFileIds []int, fileSystem FileSystem) (KeyDir, error) {
 	keyDir := make(KeyDir)
 
 	for _, dataFileId := range inactiveDataFileIds {
@@ -588,11 +588,11 @@ func generateKeyDirFromFileIds(directory string, inactiveDataFileIds []int) (Key
 		hintFileName := fmt.Sprintf("%d.hint", dataFileId)
 		hintFilepath := filepath.Join(directory, hintFileName)
 
-		if _, err := os.Stat(hintFilepath); err == nil {
-			loadKeyDirFromHintFile(hintFilepath, keyDir, dataFileId)
+		if _, err := fileSystem.Stat(hintFilepath); err == nil {
+			loadKeyDirFromHintFile(hintFilepath, keyDir, dataFileId, fileSystem)
 			// log
 		} else {
-			if err := loadKeyDirFromDataFile(dataFilepath, keyDir); err != nil {
+			if err := loadKeyDirFromDataFile(dataFilepath, keyDir, fileSystem); err != nil {
 				return nil, fmt.Errorf("Warning: error loading %s: %v", dataFileName, err)
 			}
 		}
@@ -600,8 +600,8 @@ func generateKeyDirFromFileIds(directory string, inactiveDataFileIds []int) (Key
 	return keyDir, nil
 }
 
-func loadKeyDirFromHintFile(filePath string, index KeyDir, fileId int) error {
-	hintFile, err := os.Open(filePath)
+func loadKeyDirFromHintFile(filePath string, index KeyDir, fileId int, fileSystem FileSystem) error {
+	hintFile, err := fileSystem.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("Error opening hint file to load keydir: %w", err)
 	}
@@ -642,14 +642,14 @@ func isTombStoneEntry(header []byte) (bool, error) {
 	return timeStamp>>63 == 1 && parsedHeader.ValueSize == 0, nil
 }
 
-func loadKeyDirFromDataFile(filePath string, keyDir KeyDir) error {
+func loadKeyDirFromDataFile(filePath string, keyDir KeyDir, fileSystem FileSystem) error {
 	filename := filepath.Base(filePath)
 	fileId, err := extractFileId(filename)
 	if err != nil {
 		return fmt.Errorf("extracting file ID from %s: %w", filename, err)
 	}
 
-	file, err := os.Open(filePath)
+	file, err := fileSystem.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("opening file: %w", err)
 	}

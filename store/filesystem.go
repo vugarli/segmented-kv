@@ -15,6 +15,9 @@ type FileSystem interface {
 	ReadDir(name string) ([]fs.DirEntry, error)
 	acquireExclusiveLock(directory string) (*os.File, error)
 	acquireSharedLock(directory string) (*os.File, error)
+	OpenFile(name string, flag int, perm os.FileMode) (*os.File, error)
+	Rename(oldpath string, newpath string) error
+	Stat(name string) (os.FileInfo, error)
 }
 
 type OSFileSystem struct{}
@@ -62,9 +65,18 @@ func (OSFileSystem) CreateTemp(dir string, pattern string) (*os.File, error) {
 func (OSFileSystem) Create(path string) (*os.File, error) {
 	return os.Create(path)
 }
+func (OSFileSystem) OpenFile(name string, flag int, perm os.FileMode) (*os.File, error) {
+	return os.OpenFile(name, flag, perm)
+}
 
 func (OSFileSystem) Open(name string) (*os.File, error) {
 	return os.Open(name)
+}
+func (OSFileSystem) Rename(oldpath string, newpath string) error {
+	return os.Rename(oldpath, newpath)
+}
+func (OSFileSystem) Stat(name string) (os.FileInfo, error) {
+	return os.Stat(name)
 }
 
 func (OSFileSystem) ReadDir(name string) ([]fs.DirEntry, error) {

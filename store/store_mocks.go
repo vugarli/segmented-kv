@@ -83,6 +83,12 @@ func (m MockFileSystem) isSharedLocked(path string) bool {
 func (m MockFileSystem) Open(name string) (*os.File, error) {
 	return nil, fs.ErrNotExist
 }
+func (m MockFileSystem) OpenFile(name string, flag int, perm os.FileMode) (*os.File, error) {
+	return nil, fs.ErrNotExist
+}
+func (m MockFileSystem) Rename(oldpath string, newpath string) error {
+	return fs.ErrNotExist
+}
 
 func (m MockFileSystem) Stat(name string) (fs.FileInfo, error) {
 	if m.StatFunc != nil {

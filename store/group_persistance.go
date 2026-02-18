@@ -21,26 +21,26 @@ func GenerateHintDecorator(fileSystem FileSystem, directory string, encodeHintEn
 		for fileId, group := range groups {
 			// generate hint file and save
 			hintFileTempPath := filepath.Join(directory, fmt.Sprintf("%d.hinttemp", fileId))
-			hintFile, err := os.OpenFile(hintFileTempPath, os.O_CREATE|os.O_WRONLY, 0644)
+			hintFile, err := fileSystem.OpenFile(hintFileTempPath, os.O_CREATE|os.O_WRONLY, 0644)
 			if err != nil {
 				// log
 				continue
 			}
 			if err := encodeHintEntries(hintFile, group); err != nil {
 				hintFile.Close()
-				os.Remove(hintFileTempPath)
+				fileSystem.Remove(hintFileTempPath)
 				// log
 			}
 			if err := hintFile.Sync(); err != nil {
 				hintFile.Close()
-				os.Remove(hintFileTempPath)
+				fileSystem.Remove(hintFileTempPath)
 				//log
 			}
 			hintFile.Close()
 			hintFileFinalPath := filepath.Join(directory, fmt.Sprintf("%d.hint", fileId))
 
-			if err := os.Rename(hintFileTempPath, hintFileFinalPath); err != nil {
-				os.Remove(hintFileTempPath)
+			if err := fileSystem.Rename(hintFileTempPath, hintFileFinalPath); err != nil {
+				fileSystem.Remove(hintFileTempPath)
 				// log commit failed
 			}
 		}
@@ -149,7 +149,6 @@ func groupMergeResultsByFileId(results []MergeResult) map[int][]MergeResult {
 	return groupedEntries
 }
 
-// TODO filesystem rename
 func CommitToDisk(directory string, fileSystem FileSystem) GroupOnSuccessStrat {
 	return func(results []MergeResult) {
 		resultedFileIds := make(map[int]struct{})
@@ -160,7 +159,7 @@ func CommitToDisk(directory string, fileSystem FileSystem) GroupOnSuccessStrat {
 
 				oldPath := filepath.Join(directory, fmt.Sprintf("%d.datatemp", result.FileId))
 				newPath := filepath.Join(directory, fmt.Sprintf("%d.data", result.FileId))
-				os.Rename(oldPath, newPath)
+				fileSystem.Rename(oldPath, newPath)
 				//log error
 			}
 		}
@@ -179,8 +178,7 @@ func CleanCorruptedFromDisk(directory string, fileSystem FileSystem) GroupCorrup
 	}
 }
 
-// TODO add fileSystem contract
-func SaveToDisk(directory string, idFetcher func() (int, bool)) GroupSavingStrat {
+func SaveToDisk(directory string, idFetcher func() (int, bool), fileSystem FileSystem) GroupSavingStrat {
 
 	return func(group []MergeEntryRecord) ([]MergeResult, error) {
 		fileId, ok := idFetcher()
@@ -189,7 +187,7 @@ func SaveToDisk(directory string, idFetcher func() (int, bool)) GroupSavingStrat
 		}
 
 		destinationFileName := filepath.Join(directory, fmt.Sprintf("%d.datatemp", fileId))
-		destinationFile, err := os.OpenFile(destinationFileName, os.O_CREATE|os.O_WRONLY, 0644)
+		destinationFile, err := fileSystem.OpenFile(destinationFileName, os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			return nil, fmt.Errorf("opening destination file: %w", err)
 		}
@@ -198,7 +196,7 @@ func SaveToDisk(directory string, idFetcher func() (int, bool)) GroupSavingStrat
 		result := make([]MergeResult, 0, len(group))
 		var currentOffset uint64
 		for _, staleEntry := range group {
-			originFile, err := os.Open(filepath.Join(directory, fmt.Sprintf("%d.data", staleEntry.Record.FileId)))
+			originFile, err := fileSystem.Open(filepath.Join(directory, fmt.Sprintf("%d.data", staleEntry.Record.FileId)))
 			if err != nil {
 				return nil, fmt.Errorf("%w Opening origin file: %w", ErrCorruptedState, err)
 			}
