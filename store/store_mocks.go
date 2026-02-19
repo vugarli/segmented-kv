@@ -46,6 +46,8 @@ type MockFileSystem struct {
 	acquireExclusiveLockFunc func(directory string) (*os.File, error)
 	acquireSharedLockFunc    func(directory string) (*os.File, error)
 	getNewFileIdFunc         func(directory string) (int, error)
+	renames                  map[string]string
+	renameErr                error
 }
 
 func (m MockFileSystem) getNewFileId(directory string) (int, error) {
@@ -86,10 +88,17 @@ func (m MockFileSystem) Open(name string) (*os.File, error) {
 func (m MockFileSystem) OpenFile(name string, flag int, perm os.FileMode) (*os.File, error) {
 	return nil, fs.ErrNotExist
 }
-func (m MockFileSystem) Rename(oldpath string, newpath string) error {
-	return fs.ErrNotExist
-}
+func (m MockFileSystem) Rename(oldPath, newPath string) error {
+	if m.renameErr != nil {
+		return m.renameErr
+	}
 
+	if m.renames == nil {
+		m.renames = make(map[string]string)
+	}
+	m.renames[oldPath] = newPath
+	return nil
+}
 func (m MockFileSystem) Stat(name string) (fs.FileInfo, error) {
 	if m.StatFunc != nil {
 		return m.StatFunc(name)
